@@ -9,8 +9,16 @@
     display: flex;
     justify-content: center;
     align-items: center;
-    font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", "Hiragino Kaku Gothic ProN", "Hiragino Sans", sans-serif; }
+    font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", "Hiragino Kaku Gothic ProN", "Hiragino Sans", sans-serif;
+}
 
+/* ユーザー操作がない時にカーソルを消す */
+#mv-root-container.user-inactive {
+    cursor: none;
+}
+#mv-root-container.user-inactive * {
+    cursor: none !important;
+}
 
 #mv-root-container video {
     position: absolute !important;
@@ -35,10 +43,8 @@
     height: 100%;
     z-index: 10;
     pointer-events: none;
-
     background: radial-gradient(circle at bottom right, rgba(0,0,0,0.7) 0%, rgba(0,0,0,0) 50%);
 }
-
 
 #mv-info-area {
     position: absolute;
@@ -71,12 +77,11 @@
     text-shadow: 0 2px 8px rgba(0,0,0,0.8);
 }
 
-
 #mv-lyrics-area {
     position: absolute;
     bottom: 40px;
     right: 50px;
-    width: 40vw;  
+    width: 100vw;  
     height: 35vh;
     overflow-y: scroll;
     padding: 15vh 10px;
@@ -85,6 +90,10 @@
     -webkit-mask-image: linear-gradient(to bottom, transparent 0%, black 20%, black 80%, transparent 100%);
     pointer-events: auto;
     text-align: right;
+    
+    /* スクロールバー非表示 */
+    scrollbar-width: none;
+    -ms-overflow-style: none;
 }
 #mv-lyrics-area::-webkit-scrollbar { display: none; }
 
@@ -110,7 +119,6 @@
     text-shadow: 0 0 25px rgba(255, 255, 255, 0.6); 
 }
 
-
 #mv-close-btn {
     position: absolute;
     top: 30px;
@@ -131,11 +139,11 @@
 #mv-close-btn.visible { opacity: 1; }
 #mv-close-btn:hover { background: rgba(255,255,255,0.3); }
 
-
 .ytp-mv-mode-button {
     vertical-align: top;
     display: inline-block;
-    width: auto;
+    width: auto !important; /* ボタン幅修正 */
+    min-width: 60px;
     padding: 0 10px;
     font-weight: bold;
     cursor: pointer;
@@ -143,4 +151,38 @@
     color: #fff;
     line-height: 48px;
     font-size: 14px;
+    white-space: nowrap; /* 改行防止 */
+}
+
+/* 中央に出る再生・一時停止アニメーション */
+.mv-bezel-icon {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 80px;
+    height: 80px;
+    background: rgba(0, 0, 0, 0.5);
+    border-radius: 50%;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    pointer-events: none;
+    z-index: 20;
+    opacity: 0;
+}
+
+.mv-bezel-icon.animate {
+    animation: bezel-fade 0.5s ease-out forwards;
+}
+
+@keyframes bezel-fade {
+    0% { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+    100% { opacity: 0; transform: translate(-50%, -50%) scale(1.5); }
+}
+
+.mv-bezel-icon svg {
+    fill: #fff;
+    width: 40px;
+    height: 40px;
 }

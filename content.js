@@ -52,7 +52,7 @@ async function startMVMode() {
     const overlayContent = document.createElement('div');
     overlayContent.id = 'mv-overlay-content';
     
-    // 曲情報エリア（中身は updateMVContent で入れる）
+    // 曲情報エリア
     const infoArea = document.createElement('div');
     infoArea.id = 'mv-info-area';
     overlayContent.appendChild(infoArea);
@@ -76,6 +76,23 @@ async function startMVMode() {
     targetVideo.addEventListener('timeupdate', syncLyrics);
     document.addEventListener('mousemove', onUserAction);
     document.addEventListener('click', onUserAction);
+
+    // 再生・一時停止アニメーション用イベント
+    targetVideo.addEventListener('play', onVideoPlay);
+    targetVideo.addEventListener('pause', onVideoPause);
+
+    // 画面クリックで再生/一時停止
+    rootContainer.addEventListener('click', (e) => {
+        if (e.target.closest('.lyric-line') || e.target.closest('#mv-close-btn')) {
+            return;
+        }
+        if (targetVideo.paused) {
+            targetVideo.play();
+        } else {
+            targetVideo.pause();
+        }
+    });
+
     onUserAction();
 
     // 全画面化
@@ -97,10 +114,10 @@ async function updateMVContent() {
     if(lyricsArea) lyricsArea.innerHTML = '<p style="color:#888; text-align:right; font-size:20px; padding:20px;">読み込み中...</p>';
     lyricsData = [];
 
-    // YouTubeのデータ更新を少し待つ（タイトルなどがDOMに反映されるまで）
+    // YouTubeのデータ更新を少し待つ
     await new Promise(r => setTimeout(r, 1500));
 
-    // 1. 歌詞データ取得 (なければ開く)
+    // 1. 歌詞データ取得
     let segments = document.querySelectorAll('ytd-transcript-segment-renderer');
     if (segments.length === 0) {
         const buttons = document.querySelectorAll('button');
@@ -114,21 +131,17 @@ async function updateMVContent() {
         
         if (openTranscriptBtn) {
             openTranscriptBtn.click();
-            // パネルが開くのを待つ
             await new Promise(r => setTimeout(r, 1500));
             segments = document.querySelectorAll('ytd-transcript-segment-renderer');
         }
     }
 
-    // それでもなければ諦める（歌詞なし動画など）
     if (segments.length === 0) {
         if(lyricsArea) lyricsArea.innerHTML = '<p style="color:#888; text-align:right; font-size:20px; padding:20px;">歌詞が見つかりませんでした</p>';
     } else {
-        // 文字起こしパネルを閉じる
         const closeTranscriptBtn = document.querySelector('ytd-transcript-renderer button[aria-label="閉じる"]');
         if(closeTranscriptBtn) closeTranscriptBtn.click();
 
-        // パース
         lyricsData = Array.from(segments).map(seg => {
             const timeStr = seg.querySelector('.segment-timestamp').textContent.trim();
             const text = seg.querySelector('.segment-text').textContent.trim();
@@ -139,7 +152,6 @@ async function updateMVContent() {
             return { time: seconds, text: text, el: null };
         });
 
-        // 歌詞描画
         if(lyricsArea) {
             lyricsArea.innerHTML = '';
             lyricsData.forEach(line => {
@@ -158,7 +170,6 @@ async function updateMVContent() {
     let songTitle = rawTitle;
     let rawArtist = document.querySelector('ytd-video-owner-renderer ytd-channel-name a')?.textContent.trim() || "";
 
-    // タイトル整形
     const bracketMatch = rawTitle.match(/『(.*?)』/);
     if (bracketMatch) {
         songTitle = bracketMatch[1];
@@ -172,12 +183,13 @@ async function updateMVContent() {
             .replace(/MV/gi, '')
             .replace(/full/gi, '')
             .replace(/公式/g, '')
-            .replace(/\//g, '')
             .replace(rawArtist, '')
+            // 先頭に残ったハイフンや記号を削除
+            .replace(/^[\s\-\/\|：:]+/, '') 
+            .replace(/[\s\-\/\|：:]+$/, '')
             .trim();
     }
 
-    // アーティスト名整形
     let artistName = rawArtist
         .replace(/公式チャンネル/g, '')
         .replace(/公式/g, '')
@@ -186,7 +198,6 @@ async function updateMVContent() {
         .replace(/Channel/gi, '')
         .trim();
 
-    // 更新
     if(infoArea) {
         infoArea.innerHTML = `<h1 id="mv-song-title">${songTitle}</h1><p id="mv-artist-name">${artistName}</p>`;
     }
@@ -208,7 +219,11 @@ function endMVMode() {
             originalParent.appendChild(targetVideo);
         }
     }
-    if (targetVideo) targetVideo.removeEventListener('timeupdate', syncLyrics);
+    if (targetVideo) {
+        targetVideo.removeEventListener('timeupdate', syncLyrics);
+        targetVideo.removeEventListener('play', onVideoPlay);
+        targetVideo.removeEventListener('pause', onVideoPause);
+    }
     document.removeEventListener('mousemove', onUserAction);
     document.removeEventListener('click', onUserAction);
     targetVideo = null;
@@ -217,13 +232,20 @@ function endMVMode() {
 function onUserAction() {
     const infoArea = document.getElementById('mv-info-area');
     const closeBtn = document.getElementById('mv-close-btn');
-    if(!infoArea) return;
+    if(!infoArea || !rootContainer) return;
+
     infoArea.classList.add('visible');
     closeBtn.classList.add('visible');
+    rootContainer.classList.remove('user-inactive');
+
     clearTimeout(idleTimer);
     idleTimer = setTimeout(() => {
+        // コンテナが存在しない場合は何もしない（エラー対策）
+        if (!rootContainer || !infoArea || !closeBtn) return;
+
         infoArea.classList.remove('visible');
         closeBtn.classList.remove('visible');
+        rootContainer.classList.add('user-inactive');
     }, 3000);
 }
 
@@ -262,4 +284,38 @@ function syncLyrics() {
             line.el.classList.remove('active');
         }
     });
+}
+
+function onVideoPlay() {
+    showBezelAnimation('play');
+}
+
+function onVideoPause() {
+    showBezelAnimation('pause');
+}
+
+function showBezelAnimation(type) {
+    if (!rootContainer) return;
+
+    const oldBezel = document.querySelector('.mv-bezel-icon');
+    if (oldBezel) oldBezel.remove();
+
+    const bezel = document.createElement('div');
+    bezel.className = 'mv-bezel-icon animate';
+
+    let svgContent = '';
+    if (type === 'play') {
+        svgContent = '<svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"></path></svg>';
+    } else {
+        svgContent = '<svg viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"></path></svg>';
+    }
+
+    bezel.innerHTML = svgContent;
+    rootContainer.appendChild(bezel);
+
+    setTimeout(() => {
+        if (bezel && bezel.parentNode) {
+            bezel.remove();
+        }
+    }, 500);
 }

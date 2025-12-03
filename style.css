@@ -69,10 +69,29 @@
 
 #mv-song-title {
     font-size: 42px; font-weight: 800; margin: 0 0 8px 0;
-    line-height: 1.1; letter-spacing: -0.02em;
-    text-shadow: 0 4px 20px rgba(0,0,0,0.5);
-    background: linear-gradient(135deg, #fff 0%, #ddd 100%);
-    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    line-height: 1.1; letter-spacing: -0.02em; color: #ffffff;
+    text-shadow: 0 2px 10px rgba(0,0,0,0.7);
+    white-space: nowrap;      /* 折り返さない */
+    overflow: hidden;         /* はみ出た部分を隠す */
+    max-width: 80vw;          /* 画面幅の80%を超えたら隠す */
+    display: block;
+}
+
+/* ▼▼▼ 追加: ループスクロール用クラス ▼▼▼ */
+#mv-song-title.marquee {
+    display: flex;            /* 横並びにする */
+    width: fit-content;       /* コンテンツに合わせて幅を広げる */
+}
+
+#mv-song-title.marquee span {
+    display: inline-block;
+    padding-right: 50px;      /* ループのつなぎ目の余白 */
+    animation: scroll-left 15s linear infinite; /* 15秒かけて流れる */
+}
+
+@keyframes scroll-left {
+    0%   { transform: translateX(0); }
+    100% { transform: translateX(-100%); }
 }
 #mv-artist-name {
     font-size: 18px; font-weight: 500; color: rgba(255,255,255,0.7);

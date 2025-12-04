@@ -77,7 +77,6 @@
     display: block;
 }
 
-/* ▼▼▼ 追加: ループスクロール用クラス ▼▼▼ */
 #mv-song-title.marquee {
     display: flex;            /* 横並びにする */
     width: fit-content;       /* コンテンツに合わせて幅を広げる */
@@ -200,3 +199,22 @@
 
 /* YouTubeボタンの上書き */
 .ytp-mv-mode-button { vertical-align: top; display: inline-block; padding: 0 10px; font-weight: bold; cursor: pointer; color: #fff; line-height: 48px; font-size: 14px; }
+
+
+/* --- 固定ボタン (閉じるボタンの左) --- */
+#mv-pin-btn {
+    position: absolute; top: 40px; right: 140px; 
+    z-index: 20;
+    padding: 10px 20px; border-radius: 30px; font-size: 13px;
+    opacity: 0; transition: opacity 0.4s, transform 0.3s, background 0.3s;
+}
+
+#mv-pin-btn.visible { opacity: 1; }
+
+/* 固定オン時のスタイル（白く光る） */
+#mv-pin-btn.active-pin {
+    background: rgba(255, 255, 255, 0.9);
+    color: #000;
+    border-color: #fff;
+    box-shadow: 0 0 15px rgba(255, 255, 255, 0.5);
+}

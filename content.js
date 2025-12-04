@@ -1,3 +1,4 @@
+// --- 初期化 ---
 document.addEventListener('yt-navigate-finish', onNavigate);
 window.addEventListener('load', init);
 
@@ -13,6 +14,7 @@ let rootContainer = null;
 let lyricsData = [];
 let idleTimer = null;
 let buttonObserverTimer = null; 
+let isInfoPinned = false; // ★追加: ピン留め状態管理用
 
 // --- 初期化 ---
 function init() {
@@ -225,6 +227,8 @@ async function startMVMode(isAuto = false) {
 
         <div id="mv-info-area"></div>
         <div id="mv-lyrics-area"></div>
+        
+        <button id="mv-pin-btn" class="mv-glass-btn">📌 固定オフ</button>
         <button id="mv-close-btn" class="mv-glass-btn">閉じる</button>
         <button id="mv-qr-btn" class="mv-glass-btn"><span style="margin-right:8px;">📱</span> Immersion Connect</button>
         <button id="mv-shot-btn" class="mv-glass-btn">📸 Shot</button>
@@ -239,6 +243,7 @@ async function startMVMode(isAuto = false) {
         </div>
     `;
 
+
     const closeBtn = overlayContent.querySelector('#mv-close-btn');
     if(closeBtn) closeBtn.onclick = () => endMVMode(false);
     
@@ -247,6 +252,22 @@ async function startMVMode(isAuto = false) {
     
     const shotBtn = overlayContent.querySelector('#mv-shot-btn');
     if(shotBtn) shotBtn.onclick = startHybridShotSequence;
+
+    const pinBtn = overlayContent.querySelector('#mv-pin-btn');
+    if(pinBtn) {
+        pinBtn.onclick = (e) => {
+            e.stopPropagation();
+            isInfoPinned = !isInfoPinned;
+            if (isInfoPinned) {
+                pinBtn.innerText = "📌 固定オン";
+                pinBtn.classList.add('active-pin');
+                document.getElementById('mv-info-area')?.classList.add('visible');
+            } else {
+                pinBtn.innerText = "📌 固定オフ";
+                pinBtn.classList.remove('active-pin');
+            }
+        };
+    }
 
     const qrOverlay = overlayContent.querySelector('#mv-qr-overlay');
     const qrClose = overlayContent.querySelector('#qr-close-action');
@@ -480,7 +501,8 @@ function onUserAction(e) {
     const infoArea = document.getElementById('mv-info-area');
     const closeBtn = document.getElementById('mv-close-btn');
     const qrBtn = document.getElementById('mv-qr-btn'); 
-    const shotBtn = document.getElementById('mv-shot-btn'); 
+    const shotBtn = document.getElementById('mv-shot-btn');
+    const pinBtn = document.getElementById('mv-pin-btn'); 
 
     if (rootContainer) {
         rootContainer.classList.remove('hide-cursor');
@@ -491,6 +513,7 @@ function onUserAction(e) {
         if(closeBtn) closeBtn.classList.add('visible');
         if(qrBtn) qrBtn.classList.add('visible');
         if(shotBtn) shotBtn.classList.add('visible');
+        if(pinBtn) pinBtn.classList.add('visible'); 
 
         if (idleTimer) clearTimeout(idleTimer);
         
@@ -499,11 +522,15 @@ function onUserAction(e) {
             const cb = document.getElementById('mv-close-btn');
             const qb = document.getElementById('mv-qr-btn');
             const sb = document.getElementById('mv-shot-btn');
+            const pb = document.getElementById('mv-pin-btn'); 
             
-            if(ia) ia.classList.remove('visible');
+     
+            if(ia && !isInfoPinned) ia.classList.remove('visible');
+
             if(cb) cb.classList.remove('visible');
             if(qb) qb.classList.remove('visible');
             if(sb) sb.classList.remove('visible');
+            if(pb) pb.classList.remove('visible');
 
             if (rootContainer) {
                 rootContainer.classList.add('hide-cursor');
@@ -515,6 +542,7 @@ function onUserAction(e) {
         const target = e.target;
         if (target.closest('button') || 
             target.closest('.mv-glass-btn') || 
+            target.closest('#mv-pin-btn') ||
             target.closest('a') || 
             target.closest('.lyric-line') || 
             target.closest('#mv-sidebar') || 
@@ -698,6 +726,8 @@ function getHighResThumbnail() {
     if (videoId) return `https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg`;
     return "";
 }
+
+
 
 async function startHybridShotSequence() {
     const video = document.querySelector('.video-stream.html5-main-video');
@@ -916,7 +946,6 @@ function processScreenshot(dataUrl, videoEl) {
     img.src = dataUrl;
 }
 
-
 async function generateAndShare(sourceCanvas, selectedLyrics = []) {
     if (sourceCanvas.width === 0) return;
 
@@ -942,6 +971,7 @@ async function generateAndShare(sourceCanvas, selectedLyrics = []) {
         videoId = urlParams.get('v');
     } catch (e) { console.error("Metadata fetch error", e); }
 
+   
     const cardWidth = 1080;
     const cardHeight = 1350;
     
@@ -949,6 +979,7 @@ async function generateAndShare(sourceCanvas, selectedLyrics = []) {
     finalCanvas.width = cardWidth;
     finalCanvas.height = cardHeight;
     const ctx = finalCanvas.getContext('2d');
+
 
     ctx.fillStyle = "#000";
     ctx.fillRect(0, 0, cardWidth, cardHeight);
@@ -959,18 +990,18 @@ async function generateAndShare(sourceCanvas, selectedLyrics = []) {
     const bgX = (cardWidth - bgW) / 2;
     const bgY = (cardHeight - bgH) / 2;
 
+
     ctx.filter = 'blur(90px) brightness(0.35) saturate(1.1)';
     ctx.drawImage(sourceCanvas, bgX, bgY, bgW, bgH);
     ctx.filter = 'none';
 
-    // --- B. メイン画像 (16:9, 角丸) ---
 
     const margin = 60;
     const imgWidth = cardWidth - (margin * 2); 
     const imgRatio = sourceCanvas.height / sourceCanvas.width; 
     const imgHeight = imgWidth * imgRatio;
     
-    const imgY = 180; // 上部の位置
+    const imgY = 180; 
 
     ctx.shadowColor = "rgba(0, 0, 0, 0.4)";
     ctx.shadowBlur = 60;
@@ -983,41 +1014,41 @@ async function generateAndShare(sourceCanvas, selectedLyrics = []) {
     ctx.drawImage(sourceCanvas, margin, imgY, imgWidth, imgHeight);
     ctx.restore();
 
+
     ctx.shadowColor = "transparent";
     ctx.shadowBlur = 0;
     ctx.shadowOffsetY = 0;
 
-    // --- C. テキスト情報  ---
     const infoY = imgY + imgHeight + 80;
     
-    // 曲名
+    
     ctx.fillStyle = "#ffffff";
     ctx.font = "bold 52px -apple-system, BlinkMacSystemFont, 'SF Pro Display', sans-serif";
     ctx.textAlign = "left";
     ctx.fillText(songTitle, margin, infoY);
 
-    // アーティスト名
+   
     ctx.fillStyle = "rgba(255, 255, 255, 0.6)";
     ctx.font = "500 32px -apple-system, BlinkMacSystemFont, 'SF Pro Display', sans-serif";
     ctx.fillText(artistName, margin, infoY + 55);
 
-    // --- D. 再生バー  ---
+   
     const barY = infoY + 110;
     const barHeight = 6;
     
-    // バー背景 
+   
     ctx.fillStyle = "rgba(255, 255, 255, 0.2)";
     roundedRect(ctx, margin, barY, imgWidth, barHeight, 3);
     ctx.fill();
 
-    // 進捗 
+
     const progress = duration > 0 ? (currentTime / duration) : 0;
     const progressWidth = imgWidth * progress;
     ctx.fillStyle = "#ffffff";
     roundedRect(ctx, margin, barY, progressWidth, barHeight, 3);
     ctx.fill();
 
-    // 時間表示 
+
     ctx.font = "500 20px -apple-system, monospace";
     ctx.fillStyle = "rgba(255, 255, 255, 0.5)";
     ctx.textAlign = "left";
@@ -1025,20 +1056,22 @@ async function generateAndShare(sourceCanvas, selectedLyrics = []) {
     ctx.textAlign = "right";
     ctx.fillText("-" + formatTime(duration - currentTime), cardWidth - margin, barY + 35);
 
-    // --- E. 歌詞  ---
+ 
     if (selectedLyrics.length > 0) {
         let lyricY = barY + 140;
         ctx.textAlign = "center";
         const centerX = cardWidth / 2;
 
         selectedLyrics.forEach((line, i) => {
-      
+         
             ctx.font = "700 44px -apple-system, BlinkMacSystemFont, 'Hiragino Sans', sans-serif";
+            
             
             ctx.shadowColor = "rgba(0,0,0,0.5)";
             ctx.shadowBlur = 10;
             ctx.shadowOffsetY = 0;
             
+      
             ctx.fillStyle = `rgba(255, 255, 255, ${1 - (i * 0.3)})`;
             ctx.fillText(line, centerX, lyricY);
             
@@ -1047,7 +1080,7 @@ async function generateAndShare(sourceCanvas, selectedLyrics = []) {
         ctx.shadowColor = "transparent";
     }
 
-    // --- F. QRコード  ---
+
     if (videoId) {
         const videoUrl = `https://youtu.be/${videoId}?t=${Math.floor(currentTime)}`;
         try {
@@ -1057,6 +1090,7 @@ async function generateAndShare(sourceCanvas, selectedLyrics = []) {
                 const qrX = cardWidth - margin - qrSize;
                 const qrY = cardHeight - margin - qrSize;
                 
+              
                 ctx.fillStyle = "white";
                 roundedRect(ctx, qrX - 10, qrY - 10, qrSize + 20, qrSize + 20, 12);
                 ctx.fill();

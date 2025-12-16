@@ -218,3 +218,241 @@
     border-color: #fff;
     box-shadow: 0 0 15px rgba(255, 255, 255, 0.5);
 }
+#mv-shot-btn {
+    position: absolute; 
+    top: 40px; 
+    left: 240px;
+    bottom: auto; right: auto;
+    z-index: 2000;
+    opacity: 0; pointer-events: none;
+    background: rgba(20, 20, 20, 0.6);
+    backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    color: rgba(255, 255, 255, 0.9);
+    border-radius: 30px;
+    padding: 10px 24px;
+    font-size: 13px; font-weight: 600; letter-spacing: 0.02em;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+    transition: opacity 0.4s, transform 0.2s, background 0.2s;
+}
+#mv-shot-btn.visible { opacity: 1; pointer-events: auto; }
+#mv-shot-btn:hover { 
+    transform: scale(1.05); 
+    background: rgba(255, 255, 255, 0.2);
+    border-color: rgba(255, 255, 255, 0.3);
+    color: #fff; box-shadow: 0 8px 25px rgba(0,0,0,0.5);
+}
+
+.lyric-line-container {
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    margin-bottom: 32px;
+    position: relative;
+}
+
+.lyric-line {
+    margin-bottom: 0 !important; 
+}
+
+.lyric-copy-btn {
+    width: 24px; height: 24px;
+    margin-right: 15px;
+    opacity: 0;
+    cursor: pointer;
+    transition: opacity 0.2s, transform 0.2s;
+    fill: rgba(255,255,255,0.6);
+    order: -1;
+}
+.lyric-copy-btn:hover {
+    fill: #fff;
+    transform: scale(1.2);
+}
+.lyric-line-container:hover .lyric-copy-btn {
+    opacity: 1;
+}
+
+#mv-lyrics-area.no-lyrics {
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    padding-bottom: 40px;
+    transition: opacity 0.5s ease;
+}
+
+.no-lyrics-msg {
+    color: rgba(255, 255, 255, 0.4);
+    font-size: 24px;
+    font-weight: 700;
+    text-shadow: 0 2px 10px rgba(0,0,0,0.5);
+}
+
+#mv-lyrics-area.fade-out {
+    opacity: 0;
+    pointer-events: none;
+}
+
+.ytp-mv-shot-button {
+    opacity: 0.9;
+    font-weight: bold;
+    display: inline-block;
+    vertical-align: top;
+    margin-left: 8px;
+    line-height: 48px;
+    padding: 0 5px;
+    color: #fff;
+    font-size: 100%;
+}
+.ytp-mv-shot-button:hover {
+    opacity: 1;
+    color: #fff;
+}
+
+
+
+#mv-lyrics-header {
+    position: absolute;
+  
+    bottom: calc(60vh + 80px); 
+    right: 60px;
+    width: 40vw; 
+    max-width: 500px;
+    height: 40px;
+    z-index: 100;
+    display: flex; justify-content: flex-end; align-items: center; gap: 10px;
+    pointer-events: none;
+}
+
+.mv-lyric-action-btn {
+    pointer-events: auto; cursor: pointer;
+    background: rgba(20, 20, 20, 0.6);
+    backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-radius: 20px; padding: 6px 16px;
+    color: rgba(255,255,255,0.9); font-size: 12px; font-weight: 600;
+    transition: all 0.2s;
+    display: flex; align-items: center; gap: 6px;
+    box-shadow: 0 4px 10px rgba(0,0,0,0.2);
+}
+.mv-lyric-action-btn:hover {
+    background: rgba(255, 255, 255, 0.2);
+    transform: scale(1.05);
+    color: #fff;
+}
+.mv-lyric-action-btn.primary {
+    background: rgba(255, 255, 255, 0.9); color: #000;
+}
+.mv-lyric-action-btn.primary:hover {
+    background: #fff;
+}
+
+
+#mv-lyrics-area.selecting .lyric-line-container {
+    cursor: pointer;
+    border-radius: 8px;
+    transition: all 0.2s;
+    opacity: 0.4;
+}
+#mv-lyrics-area.selecting .lyric-line-container:hover {
+    background: rgba(255,255,255,0.1);
+    opacity: 0.8;
+}
+#mv-lyrics-area.selecting .lyric-line-container.selected {
+    background: rgba(255,255,255,0.25);
+    opacity: 1 !important;
+    transform: scale(1.02);
+    box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+}
+
+
+.lyric-copy-btn { display: none !important; }
+
+
+#mv-lyrics-area {
+    position: absolute; 
+    bottom: 60px; right: 60px;
+    width: 40vw; max-width: 500px; left: auto;
+    height: 30vh; 
+    overflow-y: scroll;
+    padding: 5vh 0 10vh 0; 
+    box-sizing: border-box;
+    mask-image: linear-gradient(to bottom, transparent 0%, black 15%, black 85%, transparent 100%);
+    -webkit-mask-image: linear-gradient(to bottom, transparent 0%, black 15%, black 85%, transparent 100%);
+    pointer-events: auto; text-align: right;
+    scrollbar-width: none; -ms-overflow-style: none;
+    transition: opacity 0.3s; 
+    }
+
+
+#mv-lyrics-header {
+    position: absolute;
+
+    bottom: calc(30vh + 40px); 
+    right: 60px;
+    width: 40vw; max-width: 500px;
+    height: 40px;
+    z-index: 100;
+    display: flex; justify-content: flex-end; align-items: center; gap: 10px;
+
+    opacity: 0; 
+    pointer-events: none;
+    transition: opacity 0.3s ease;
+}
+
+
+#mv-lyrics-header.visible {
+    opacity: 1;
+    pointer-events: auto; 
+}
+
+
+#shot-result-overlay, #shot-selector-overlay {
+    position: fixed !important; 
+    top: 0; left: 0; width: 100vw !important; height: 100vh !important;
+    background: rgba(0,0,0,0.85);
+    z-index: 2147483650 !important; 
+    display: flex !important; 
+    align-items: center; justify-content: center;
+    backdrop-filter: blur(10px);
+    flex-direction: column;
+}
+
+
+.lyric-selection-container {
+    flex: 1; max-width: 350px; 
+    background: rgba(30, 30, 30, 0.8); 
+    backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+    border-radius: 16px; padding: 20px; 
+    overflow-y: auto; max-height: 60vh; 
+    border: 1px solid rgba(255,255,255,0.15);
+    box-shadow: 0 10px 40px rgba(0,0,0,0.5);
+    display: flex; flex-direction: column;
+    margin-left: 20px; 
+}
+
+#shot-result-overlay > div {
+    display: flex; flex-direction: row; 
+    align-items: flex-start; justify-content: center;
+    max-width: 90%;
+}
+
+.lyric-select-item {
+    padding: 12px 16px; margin-bottom: 8px; border-radius: 8px;
+    cursor: pointer; color: rgba(255,255,255,0.7); font-size: 14px;
+    transition: all 0.2s; border: 1px solid transparent;
+    background: rgba(255,255,255,0.05);
+}
+.lyric-select-item:hover { 
+    background: rgba(255,255,255,0.15); color: #fff; 
+}
+.lyric-select-item.selected {
+    background: rgba(255,255,255,0.25); color: #fff; font-weight: bold;
+    border-color: rgba(255,255,255,0.5);
+    box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+}
+
+.lyric-selection-header {
+    font-size: 16px; font-weight: 700; color: #fff; margin-bottom: 20px;
+    text-align: center; border-bottom: 1px solid rgba(255,255,255,0.1);
+    padding-bottom: 10px;
+}

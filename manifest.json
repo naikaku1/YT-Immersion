@@ -1,0 +1,42 @@
+{
+  "manifest_version": 3,
+  "name": "YT Immersion",
+  "version": "0.9.3",
+  "description": "Beta3",
+  "permissions": ["scripting", "activeTab"],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    },
+    "default_title": "MVモードを起動"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://www.youtube.com/*"],
+      "css": ["style.css"],
+      "js": ["qrcode.min.js", "content.js"]
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["peerjs.min.js", "qrcode.min.js", "bridge.html", "bridge.js", "page_script.js"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}

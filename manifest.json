@@ -1,9 +1,12 @@
 {
   "manifest_version": 3,
   "name": "YT Immersion",
-  "version": "0.9.3",
-  "description": "Beta3",
-  "permissions": ["scripting", "activeTab"],
+  "version": "0.9.4",
+  "description": "beta 4",
+  "permissions": [
+    "scripting",
+    "activeTab"
+  ],
   "host_permissions": [
     "<all_urls>"
   ],
@@ -28,15 +31,22 @@
   },
   "content_scripts": [
     {
-      "matches": ["https://www.youtube.com/*"],
-      "css": ["style.css"],
-      "js": ["qrcode.min.js", "content.js"]
+      "matches": [
+        "https://www.youtube.com/*"
+      ],
+      "css": [
+        "style.css"
+      ],
+      "js": [
+        "qrcode.min.js",
+        "content.js"
+      ]
     }
   ],
   "web_accessible_resources": [
     {
-      "resources": ["peerjs.min.js", "qrcode.min.js", "bridge.html", "bridge.js", "page_script.js"],
-      "matches": ["<all_urls>"]
+      "resources": [ "style.css" ],
+      "matches": [ "<all_urls>" ]
     }
   ]
 }

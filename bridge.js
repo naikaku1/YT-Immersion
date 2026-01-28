@@ -1,6 +1,6 @@
 let peer = null;
 let conn = null;
-let msgQueue = []; 
+let msgQueue = [];
 
 const peerConfig = {
     config: {
@@ -24,12 +24,10 @@ if (typeof Peer !== 'undefined') {
         conn = c;
         console.log("Bridge: Connection received");
 
-     
         conn.on('open', () => {
             console.log("Bridge: Connection OPEN!");
             window.parent.postMessage({ type: 'PEER_CONNECTED' }, '*');
-            
-           
+
             while (msgQueue.length > 0) {
                 const payload = msgQueue.shift();
                 try {
@@ -46,20 +44,19 @@ if (typeof Peer !== 'undefined') {
              console.log("Bridge: Connection closed");
              window.parent.postMessage({ type: 'PEER_DISCONNECTED' }, '*');
         });
-        
+
         conn.on('error', (err) => {
             console.error("Bridge Connection Error:", err);
         });
     });
 }
 
-
 window.addEventListener('message', (event) => {
     if (event.data && event.data.type === 'SEND_TO_PEER') {
         const payload = event.data.payload;
-        
+
         if (conn && conn.open) {
-            
+
             try {
                 conn.send(payload);
             } catch(e) {

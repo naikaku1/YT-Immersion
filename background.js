@@ -9,6 +9,6 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 sendResponse({ success: true, dataUrl: dataUrl });
             }
         });
-        return true; 
+        return true;
     }
 });

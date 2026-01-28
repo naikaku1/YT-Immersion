@@ -1,248 +1,467 @@
-/* --- ベース設定 --- */
+
 #mv-root-container {
-    position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
-    background: #000; z-index: 2147483647;
-    display: flex; justify-content: center; align-items: center;
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    background: #000;
+    z-index: 2147483647;
+    display: flex;
+    justify-content: center;
+    align-items: center;
     font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Hiragino Kaku Gothic ProN", "Hiragino Sans", sans-serif;
     overflow: hidden;
 }
 
 #mv-root-container video {
-    position: absolute !important; top: 0 !important; left: 0 !important;
-    width: 100% !important; height: 100% !important;
-    object-fit: contain !important; background: #000 !important;
+    position: absolute !important;
+    top: 0 !important;
+    left: 0 !important;
+    width: 100% !important;
+    height: 100% !important;
+    object-fit: contain !important;
+    background: #000 !important;
     z-index: 0 !important;
 }
 
-/* --- オーバーレイと背景 --- */
 #mv-overlay-content {
-    position: absolute; top: 0; left: 0; width: 100%; height: 100%;
-    z-index: 10; pointer-events: none; /* ここはクリックを通す */
-    background: radial-gradient(circle at bottom right, rgba(0,0,0,0.85) 0%, rgba(0,0,0,0.2) 60%, rgba(0,0,0,0.4) 100%);
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    z-index: 10;
+    pointer-events: none;
+
+    background: radial-gradient(circle at bottom right, rgba(0, 0, 0, 0.88) 0%, rgba(0, 0, 0, 0.25) 60%, rgba(0, 0, 0, 0.45) 100%);
 }
 
-/* --- ボタン共通スタイル --- */
 .mv-glass-btn {
-    pointer-events: auto; cursor: pointer;
-    background: rgba(20, 20, 20, 0.6);
-    backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
-    border: 1px solid rgba(255, 255, 255, 0.15);
-    color: rgba(255, 255, 255, 0.9);
-    transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
-    box-shadow: 0 4px 15px rgba(0,0,0,0.3);
-    font-weight: 600; letter-spacing: 0.02em;
-    display: flex; align-items: center; justify-content: center;
+    pointer-events: auto;
+    cursor: pointer;
+    background: rgba(10, 10, 10, 0.5);
+    backdrop-filter: blur(30px);
+    -webkit-backdrop-filter: blur(30px);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    color: rgba(255, 255, 255, 0.95);
+    transition: all 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.25), 0 1px 3px rgba(0, 0, 0, 0.1);
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    display: flex;
+    align-items: center;
+    justify-content: center;
 }
+
 .mv-glass-btn:hover {
-    background: rgba(255, 255, 255, 0.2);
-    transform: scale(1.05);
-    border-color: rgba(255, 255, 255, 0.3);
-    box-shadow: 0 8px 25px rgba(0,0,0,0.5);
+    background: rgba(255, 255, 255, 0.15);
+    transform: translateY(-1px) scale(1.02);
+    border-color: rgba(255, 255, 255, 0.25);
+    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.35), 0 2px 8px rgba(0, 0, 0, 0.15);
     color: #fff;
 }
-.mv-glass-btn:active { transform: scale(0.95); }
 
-/* 左上：Immersion Connectボタン */
+.mv-glass-btn:active {
+    transform: translateY(0) scale(0.98);
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.2);
+}
+
 #mv-qr-btn {
-    position: absolute; top: 40px; left: 40px; z-index: 20;
-    padding: 10px 20px; border-radius: 30px; font-size: 13px;
-    opacity: 0; transition: opacity 0.4s, transform 0.3s; 
+    display: none !important;
 }
-#mv-qr-btn.visible { opacity: 1; } 
 
-/* 右上：閉じるボタン */
 #mv-close-btn {
-    position: absolute; top: 40px; right: 40px; z-index: 20;
-    padding: 10px 24px; border-radius: 30px; font-size: 13px;
-    opacity: 0; transition: opacity 0.4s, transform 0.3s;
+    position: absolute;
+    top: 30px;
+    right: 30px;
+    z-index: 20;
+    width: 42px;
+    height: 42px;
+    padding: 0;
+    border-radius: 50%;
+    font-size: 13px;
+    opacity: 0;
+    transition: opacity 0.4s ease, transform 0.35s ease;
+    display: flex;
+    align-items: center;
+    justify-content: center;
 }
-#mv-close-btn.visible { opacity: 1; }
 
-/* --- 曲情報エリア --- */
+#mv-close-btn.visible {
+    opacity: 1;
+}
+
+#mv-close-btn:hover {
+    background: rgba(255, 60, 60, 0.2);
+    border-color: rgba(255, 80, 80, 0.4);
+    transform: translateY(-1px) scale(1.05) rotate(90deg);
+}
+
 #mv-info-area {
-    position: absolute; bottom: 80px; left: 60px;
-    text-align: left; color: #fff; opacity: 0;
-    transform: translateY(20px); transition: all 0.6s cubic-bezier(0.16, 1, 0.3, 1);
+    position: absolute;
+    bottom: 80px;
+    left: 60px;
+    text-align: left;
+    color: #fff;
+    opacity: 0;
+    transform: translateY(20px);
+    transition: all 0.6s cubic-bezier(0.16, 1, 0.3, 1);
     pointer-events: auto;
 }
-#mv-info-area.visible { opacity: 1; transform: translateY(0); }
+
+#mv-info-area.visible {
+    opacity: 1;
+    transform: translateY(0);
+}
 
 #mv-song-title {
-    font-size: 42px; font-weight: 800; margin: 0 0 8px 0;
-    line-height: 1.1; letter-spacing: -0.02em; color: #ffffff;
-    text-shadow: 0 2px 10px rgba(0,0,0,0.7);
-    white-space: nowrap;     
-    overflow: hidden;        
-    max-width: 80vw;          
+    font-size: 42px;
+    font-weight: 800;
+    margin: 0 0 8px 0;
+    line-height: 1.1;
+    letter-spacing: -0.02em;
+    color: #ffffff;
+    text-shadow: 0 2px 10px rgba(0, 0, 0, 0.7);
+    white-space: nowrap;
+    overflow: hidden;
+    max-width: 80vw;
     display: block;
 }
 
 #mv-song-title.marquee {
-    display: flex;            
-    width: fit-content;       
+    display: flex;
+    width: fit-content;
 }
 
 #mv-song-title.marquee span {
     display: inline-block;
-    padding-right: 50px;      
-    animation: scroll-left 15s linear infinite; 
+    padding-right: 50px;
+    animation: scroll-left 15s linear infinite;
 }
 
 @keyframes scroll-left {
-    0%   { transform: translateX(0); }
-    100% { transform: translateX(-100%); }
-}
-#mv-artist-name {
-    font-size: 18px; font-weight: 500; color: rgba(255,255,255,0.7);
-    margin: 0; letter-spacing: 0.05em; text-transform: uppercase;
+    0% {
+        transform: translateX(0);
+    }
+
+    100% {
+        transform: translateX(-100%);
+    }
 }
 
-/* --- 歌詞エリア --- */
+#mv-artist-name {
+    font-size: 18px;
+    font-weight: 500;
+    color: rgba(255, 255, 255, 0.7);
+    margin: 0;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+}
+
 #mv-lyrics-area {
-    position: absolute; bottom: 60px; right: 60px; left: 40%;
-    height: 40vh; overflow-y: scroll;
-    padding: 15vh 0; box-sizing: border-box;
+    position: absolute;
+    bottom: 60px;
+    right: 60px;
+    left: 40%;
+    height: 40vh;
+    overflow-y: scroll;
+    padding: 15vh 0;
+    box-sizing: border-box;
     mask-image: linear-gradient(to bottom, transparent 0%, black 25%, black 75%, transparent 100%);
     -webkit-mask-image: linear-gradient(to bottom, transparent 0%, black 25%, black 75%, transparent 100%);
-    pointer-events: auto; text-align: right;
-    /* スクロールバー非表示 */
-    scrollbar-width: none; -ms-overflow-style: none;
+    pointer-events: auto;
+    text-align: right;
+
+    scrollbar-width: none;
+    -ms-overflow-style: none;
 }
-#mv-lyrics-area::-webkit-scrollbar { display: none; }
+
+#mv-lyrics-area::-webkit-scrollbar {
+    display: none;
+}
 
 .lyric-line {
-    font-size: 32px; font-weight: 700; color: rgba(255, 255, 255, 0.35);
-    margin-bottom: 32px; cursor: pointer;
+    font-size: 32px;
+    font-weight: 700;
+    color: rgba(255, 255, 255, 0.35);
+    margin-bottom: 32px;
+    cursor: pointer;
     transition: all 0.5s cubic-bezier(0.25, 0.46, 0.45, 0.94);
-    transform-origin: right center; line-height: 1.5;
-    font-feature-settings: "palt"; letter-spacing: 0.02em;
+    transform-origin: right center;
+    line-height: 1.5;
+    font-feature-settings: "palt";
+    letter-spacing: 0.02em;
 }
-.lyric-line:hover { color: rgba(255,255,255,0.8); transform: translateX(-10px); }
+
+.lyric-line:hover {
+    color: rgba(255, 255, 255, 0.8);
+    transform: translateX(-10px);
+}
 
 .lyric-line.active {
-    color: #fff; transform: scale(1.05) translateX(-20px);
+    color: #fff;
+    transform: scale(1.05) translateX(-20px);
     text-shadow: 0 0 30px rgba(255, 255, 255, 0.4);
 }
 
-/* --- QRコードモーダル --- */
 #mv-qr-overlay {
-    position: absolute; top: 0; left: 0; width: 100%; height: 100%;
-    background: rgba(0,0,0,0.6); backdrop-filter: blur(10px);
-    z-index: 1000; display: none;
-    align-items: center; justify-content: center;
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.6);
+    backdrop-filter: blur(10px);
+    z-index: 1000;
+    display: none;
+    align-items: center;
+    justify-content: center;
     pointer-events: auto;
     animation: fadeIn 0.3s ease;
 }
 
 #mv-qr-card {
     background: rgba(30, 30, 30, 0.85);
-    backdrop-filter: blur(30px); -webkit-backdrop-filter: blur(30px);
+    backdrop-filter: blur(30px);
+    -webkit-backdrop-filter: blur(30px);
     border: 1px solid rgba(255, 255, 255, 0.1);
-    padding: 40px; border-radius: 32px;
-    text-align: center; color: #fff;
-    box-shadow: 0 20px 50px rgba(0,0,0,0.6);
+    padding: 40px;
+    border-radius: 32px;
+    text-align: center;
+    color: #fff;
+    box-shadow: 0 20px 50px rgba(0, 0, 0, 0.6);
     transform: scale(0.95);
     animation: popIn 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards;
     position: relative;
-    max-width: 320px; width: 100%;
+    max-width: 320px;
+    width: 100%;
 }
 
 #mv-qr-card h3 {
-    margin: 0 0 20px 0; font-size: 18px; font-weight: 600; letter-spacing: 0.05em; color: rgba(255,255,255,0.9);
+    margin: 0 0 20px 0;
+    font-size: 18px;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    color: rgba(255, 255, 255, 0.9);
 }
+
 #qrcode {
-    background: #fff; padding: 15px; border-radius: 16px;
-    display: inline-block; box-shadow: 0 5px 15px rgba(0,0,0,0.2);
+    background: #fff;
+    padding: 15px;
+    border-radius: 16px;
+    display: inline-block;
+    box-shadow: 0 5px 15px rgba(0, 0, 0, 0.2);
 }
+
 #mv-qr-card p {
-    margin-top: 20px; font-size: 12px; color: rgba(255,255,255,0.5);
+    margin-top: 20px;
+    font-size: 12px;
+    color: rgba(255, 255, 255, 0.5);
 }
 
 .qr-close-btn {
-    margin-top: 25px; width: 100%; padding: 12px; border-radius: 16px;
-    background: rgba(255,255,255,0.1); border: none; color: #fff;
-    font-weight: 600; cursor: pointer; transition: background 0.2s;
+    margin-top: 25px;
+    width: 100%;
+    padding: 12px;
+    border-radius: 16px;
+    background: rgba(255, 255, 255, 0.1);
+    border: none;
+    color: #fff;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.2s;
 }
-.qr-close-btn:hover { background: rgba(255,255,255,0.2); }
 
-/* --- サイドバー --- */
-#mv-sidebar-trigger { position: fixed; top: 0; right: 0; width: 20px; height: 100vh; z-index: 900; }
+.qr-close-btn:hover {
+    background: rgba(255, 255, 255, 0.2);
+}
+
+#mv-sidebar-trigger {
+    position: fixed;
+    top: 0;
+    right: 0;
+    width: 20px;
+    height: 100vh;
+    z-index: 900;
+}
+
 #mv-sidebar {
-    position: fixed; top: 0; right: 0; width: 360px; height: 100vh;
-    background: rgba(20, 20, 20, 0.95); 
-    backdrop-filter: blur(40px); -webkit-backdrop-filter: blur(40px);
+    position: fixed;
+    top: 0;
+    right: 0;
+    width: 360px;
+    height: 100vh;
+    background: rgba(20, 20, 20, 0.95);
+    backdrop-filter: blur(40px);
+    -webkit-backdrop-filter: blur(40px);
     border-left: 1px solid rgba(255, 255, 255, 0.1);
-    transform: translateX(110%); transition: transform 0.4s cubic-bezier(0.16, 1, 0.3, 1);
-    z-index: 2147483647; 
-    padding: 30px; box-sizing: border-box; 
-    overflow-y: auto; 
+    transform: translateX(110%);
+    transition: transform 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+    z-index: 2147483647;
+    padding: 30px;
+    box-sizing: border-box;
+    overflow-y: auto;
 }
 
-#mv-sidebar.visible, #mv-sidebar-trigger:hover + #mv-sidebar, #mv-sidebar:hover { transform: translateX(0); }
-#mv-sidebar::-webkit-scrollbar { display: none; }
+#mv-sidebar.visible,
+#mv-sidebar-trigger:hover+#mv-sidebar,
+#mv-sidebar:hover {
+    transform: translateX(0);
+}
+
+#mv-sidebar::-webkit-scrollbar {
+    display: none;
+}
+
 #mv-sidebar h2 {
-    color: #fff; font-size: 20px; margin: 0 0 25px 0; padding-bottom: 15px;
-    border-bottom: 1px solid rgba(255,255,255,0.1); font-weight: 700;
+    color: #fff;
+    font-size: 20px;
+    margin: 0 0 25px 0;
+    padding-bottom: 15px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    font-weight: 700;
 }
+
 .mv-next-item {
-    display: flex; align-items: center; padding: 12px; margin-bottom: 10px;
-    border-radius: 12px; cursor: pointer; transition: background 0.2s;
-    text-decoration: none; color: inherit;
+    display: flex;
+    align-items: center;
+    padding: 12px;
+    margin-bottom: 10px;
+    border-radius: 12px;
+    cursor: pointer;
+    transition: background 0.2s;
+    text-decoration: none;
+    color: inherit;
 }
-.mv-next-item:hover { background: rgba(255, 255, 255, 0.1); }
-.mv-next-thumb { width: 110px; height: 62px; border-radius: 6px; object-fit: cover; background: #333; margin-right: 15px; }
-.mv-next-info { flex: 1; overflow: hidden; }
-.mv-next-title { color: rgba(255,255,255,0.9); font-size: 14px; font-weight: 500; margin-bottom: 4px; line-height: 1.3; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-.mv-next-artist { color: rgba(255, 255, 255, 0.5); font-size: 12px; }
 
-/* アニメーション */
-@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
-@keyframes popIn { from { transform: scale(0.9); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+.mv-next-item:hover {
+    background: rgba(255, 255, 255, 0.1);
+}
 
-/* YouTubeボタンの上書き */
-.ytp-mv-mode-button { vertical-align: top; display: inline-block; padding: 0 10px; font-weight: bold; cursor: pointer; color: #fff; line-height: 48px; font-size: 14px; }
+.mv-next-thumb {
+    width: 110px;
+    height: 62px;
+    border-radius: 6px;
+    object-fit: cover;
+    background: #333;
+    margin-right: 15px;
+}
 
+.mv-next-info {
+    flex: 1;
+    overflow: hidden;
+}
 
+.mv-next-title {
+    color: rgba(255, 255, 255, 0.9);
+    font-size: 14px;
+    font-weight: 500;
+    margin-bottom: 4px;
+    line-height: 1.3;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+
+.mv-next-artist {
+    color: rgba(255, 255, 255, 0.5);
+    font-size: 12px;
+}
+
+@keyframes fadeIn {
+    from {
+        opacity: 0;
+    }
+
+    to {
+        opacity: 1;
+    }
+}
+
+@keyframes popIn {
+    from {
+        transform: scale(0.9);
+        opacity: 0;
+    }
+
+    to {
+        transform: scale(1);
+        opacity: 1;
+    }
+}
+
+.ytp-mv-mode-button {
+    vertical-align: top;
+    display: inline-block;
+    padding: 0 10px;
+    font-weight: bold;
+    cursor: pointer;
+    color: #fff;
+    line-height: 48px;
+    font-size: 14px;
+}
 
 #mv-pin-btn {
-    position: absolute; top: 40px; right: 140px; 
+    position: absolute;
+    top: 30px;
+    right: 85px;
     z-index: 20;
-    padding: 10px 20px; border-radius: 30px; font-size: 13px;
-    opacity: 0; transition: opacity 0.4s, transform 0.3s, background 0.3s;
+    height: 42px;
+    padding: 0 20px;
+    border-radius: 24px;
+    font-size: 13px;
+    opacity: 0;
+    transition: all 0.4s ease;
+    display: flex;
+    align-items: center;
 }
 
-#mv-pin-btn.visible { opacity: 1; }
-
+#mv-pin-btn.visible {
+    opacity: 1;
+}
 
 #mv-pin-btn.active-pin {
-    background: rgba(255, 255, 255, 0.9);
+    background: rgba(255, 255, 255, 0.95);
     color: #000;
-    border-color: #fff;
-    box-shadow: 0 0 15px rgba(255, 255, 255, 0.5);
+    border-color: rgba(255, 255, 255, 0.5);
+    box-shadow: 0 0 20px rgba(255, 255, 255, 0.3), inset 0 1px 2px rgba(0, 0, 0, 0.1);
 }
+
 #mv-shot-btn {
-    position: absolute; 
-    top: 40px; 
-    left: 165px;
-    bottom: auto; right: auto;
+    position: absolute;
+    top: 30px;
+    left: 30px;
     z-index: 2000;
-    opacity: 0; pointer-events: none;
-    background: rgba(20, 20, 20, 0.6);
-    backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
-    border: 1px solid rgba(255, 255, 255, 0.15);
-    color: rgba(255, 255, 255, 0.9);
-    border-radius: 30px;
-    padding: 10px 24px;
-    font-size: 13px; font-weight: 600; letter-spacing: 0.02em;
-    box-shadow: 0 4px 15px rgba(0,0,0,0.3);
-    transition: opacity 0.4s, transform 0.2s, background 0.2s;
+    height: 42px;
+    padding: 0 20px;
+    opacity: 0;
+    pointer-events: none;
+    border-radius: 24px;
+    font-size: 13px;
+    transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
 }
-#mv-shot-btn.visible { opacity: 1; pointer-events: auto; }
-#mv-shot-btn:hover { 
-    transform: scale(1.05); 
-    background: rgba(255, 255, 255, 0.2);
-    border-color: rgba(255, 255, 255, 0.3);
-    color: #fff; box-shadow: 0 8px 25px rgba(0,0,0,0.5);
+
+#mv-desktop-btn {
+    position: absolute;
+    top: 30px;
+    left: 135px;
+    z-index: 2000;
+    height: 42px;
+    padding: 0 20px;
+    opacity: 0;
+    pointer-events: none;
+    border-radius: 24px;
+    font-size: 13px;
+    transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+#mv-shot-btn.visible,
+#mv-desktop-btn.visible {
+    opacity: 1;
+    pointer-events: auto;
 }
 
 .lyric-line-container {
@@ -254,22 +473,25 @@
 }
 
 .lyric-line {
-    margin-bottom: 0 !important; 
+    margin-bottom: 0 !important;
 }
 
 .lyric-copy-btn {
-    width: 24px; height: 24px;
+    width: 24px;
+    height: 24px;
     margin-right: 15px;
     opacity: 0;
     cursor: pointer;
     transition: opacity 0.2s, transform 0.2s;
-    fill: rgba(255,255,255,0.6);
+    fill: rgba(255, 255, 255, 0.6);
     order: -1;
 }
+
 .lyric-copy-btn:hover {
     fill: #fff;
     transform: scale(1.2);
 }
+
 .lyric-line-container:hover .lyric-copy-btn {
     opacity: 1;
 }
@@ -286,7 +508,7 @@
     color: rgba(255, 255, 255, 0.4);
     font-size: 24px;
     font-weight: 700;
-    text-shadow: 0 2px 10px rgba(0,0,0,0.5);
+    text-shadow: 0 2px 10px rgba(0, 0, 0, 0.5);
 }
 
 #mv-lyrics-area.fade-out {
@@ -305,49 +527,64 @@
     color: #fff;
     font-size: 100%;
 }
+
 .ytp-mv-shot-button:hover {
     opacity: 1;
     color: #fff;
 }
 
-
-
 #mv-lyrics-header {
     position: absolute;
-  
-    bottom: calc(60vh + 80px); 
+
+    bottom: calc(60vh + 80px);
     right: 60px;
-    width: 40vw; 
+    width: 40vw;
     max-width: 500px;
     height: 40px;
     z-index: 100;
-    display: flex; justify-content: flex-end; align-items: center; gap: 10px;
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    gap: 10px;
     pointer-events: none;
 }
 
 .mv-lyric-action-btn {
-    pointer-events: auto; cursor: pointer;
-    background: rgba(20, 20, 20, 0.6);
-    backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
-    border: 1px solid rgba(255, 255, 255, 0.2);
-    border-radius: 20px; padding: 6px 16px;
-    color: rgba(255,255,255,0.9); font-size: 12px; font-weight: 600;
-    transition: all 0.2s;
-    display: flex; align-items: center; gap: 6px;
-    box-shadow: 0 4px 10px rgba(0,0,0,0.2);
-}
-.mv-lyric-action-btn:hover {
-    background: rgba(255, 255, 255, 0.2);
-    transform: scale(1.05);
-    color: #fff;
-}
-.mv-lyric-action-btn.primary {
-    background: rgba(255, 255, 255, 0.9); color: #000;
-}
-.mv-lyric-action-btn.primary:hover {
-    background: #fff;
+    pointer-events: auto;
+    cursor: pointer;
+    background: rgba(10, 10, 10, 0.5);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 24px;
+    padding: 8px 18px;
+    color: rgba(255, 255, 255, 0.95);
+    font-size: 12px;
+    font-weight: 600;
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
 }
 
+.mv-lyric-action-btn:hover {
+    background: rgba(255, 255, 255, 0.15);
+    transform: translateY(-1px) scale(1.03);
+    color: #fff;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.3);
+}
+
+.mv-lyric-action-btn.primary {
+    background: rgba(255, 255, 255, 0.95);
+    color: #000;
+    box-shadow: 0 4px 15px rgba(255, 255, 255, 0.15);
+}
+
+.mv-lyric-action-btn.primary:hover {
+    background: #fff;
+    box-shadow: 0 6px 20px rgba(255, 255, 255, 0.25);
+}
 
 #mv-lyrics-area.selecting .lyric-line-container {
     cursor: pointer;
@@ -355,182 +592,300 @@
     transition: all 0.2s;
     opacity: 0.4;
 }
+
 #mv-lyrics-area.selecting .lyric-line-container:hover {
-    background: rgba(255,255,255,0.1);
+    background: rgba(255, 255, 255, 0.1);
     opacity: 0.8;
 }
+
 #mv-lyrics-area.selecting .lyric-line-container.selected {
-    background: rgba(255,255,255,0.25);
+    background: rgba(255, 255, 255, 0.25);
     opacity: 1 !important;
     transform: scale(1.02);
-    box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
 }
 
-
-.lyric-copy-btn { display: none !important; }
-
+.lyric-copy-btn {
+    display: none !important;
+}
 
 #mv-lyrics-area {
-    position: absolute; 
-    bottom: 60px; right: 60px;
-    width: 40vw; max-width: 500px; left: auto;
-    height: 30vh; 
+    position: absolute;
+    bottom: 60px;
+    right: 60px;
+    width: 40vw;
+    max-width: 500px;
+    left: auto;
+    height: 30vh;
     overflow-y: scroll;
-    padding: 5vh 0 10vh 0; 
+    padding: 5vh 0 10vh 0;
     box-sizing: border-box;
     mask-image: linear-gradient(to bottom, transparent 0%, black 15%, black 85%, transparent 100%);
     -webkit-mask-image: linear-gradient(to bottom, transparent 0%, black 15%, black 85%, transparent 100%);
-    pointer-events: auto; text-align: right;
-    scrollbar-width: none; -ms-overflow-style: none;
-    transition: opacity 0.3s; 
-    }
-
+    pointer-events: auto;
+    text-align: right;
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+    transition: opacity 0.3s;
+}
 
 #mv-lyrics-header {
     position: absolute;
 
-    bottom: calc(30vh + 40px); 
+    bottom: calc(30vh + 40px);
     right: 60px;
-    width: 40vw; max-width: 500px;
+    width: 40vw;
+    max-width: 500px;
     height: 40px;
     z-index: 100;
-    display: flex; justify-content: flex-end; align-items: center; gap: 10px;
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    gap: 10px;
 
-    opacity: 0; 
+    opacity: 0;
     pointer-events: none;
     transition: opacity 0.3s ease;
 }
 
-
 #mv-lyrics-header.visible {
     opacity: 1;
-    pointer-events: auto; 
+    pointer-events: auto;
 }
 
-
-#shot-result-overlay, #shot-selector-overlay {
-    position: fixed !important; 
-    top: 0; left: 0; width: 100vw !important; height: 100vh !important;
-    background: rgba(0,0,0,0.85);
-    z-index: 2147483650 !important; 
-    display: flex !important; 
-    align-items: center; justify-content: center;
+#shot-result-overlay,
+#shot-selector-overlay {
+    position: fixed !important;
+    top: 0;
+    left: 0;
+    width: 100vw !important;
+    height: 100vh !important;
+    background: rgba(0, 0, 0, 0.85);
+    z-index: 2147483650 !important;
+    display: flex !important;
+    align-items: center;
+    justify-content: center;
     backdrop-filter: blur(10px);
     flex-direction: column;
 }
 
-
 .lyric-selection-container {
-    flex: 1; max-width: 350px; 
-    background: rgba(30, 30, 30, 0.8); 
-    backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
-    border-radius: 16px; padding: 20px; 
-    overflow-y: auto; max-height: 60vh; 
-    border: 1px solid rgba(255,255,255,0.15);
-    box-shadow: 0 10px 40px rgba(0,0,0,0.5);
-    display: flex; flex-direction: column;
-    margin-left: 20px; 
+    flex: 1;
+    max-width: 350px;
+    background: rgba(30, 30, 30, 0.8);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border-radius: 16px;
+    padding: 20px;
+    overflow-y: auto;
+    max-height: 60vh;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
+    display: flex;
+    flex-direction: column;
+    margin-left: 20px;
 }
 
-#shot-result-overlay > div {
-    display: flex; flex-direction: row; 
-    align-items: flex-start; justify-content: center;
+#shot-result-overlay>div {
+    display: flex;
+    flex-direction: row;
+    align-items: flex-start;
+    justify-content: center;
     max-width: 90%;
 }
 
 .lyric-select-item {
-    padding: 12px 16px; margin-bottom: 8px; border-radius: 8px;
-    cursor: pointer; color: rgba(255,255,255,0.7); font-size: 14px;
-    transition: all 0.2s; border: 1px solid transparent;
-    background: rgba(255,255,255,0.05);
+    padding: 12px 16px;
+    margin-bottom: 8px;
+    border-radius: 8px;
+    cursor: pointer;
+    color: rgba(255, 255, 255, 0.7);
+    font-size: 14px;
+    transition: all 0.2s;
+    border: 1px solid transparent;
+    background: rgba(255, 255, 255, 0.05);
 }
-.lyric-select-item:hover { 
-    background: rgba(255,255,255,0.15); color: #fff; 
+
+.lyric-select-item:hover {
+    background: rgba(255, 255, 255, 0.15);
+    color: #fff;
 }
+
 .lyric-select-item.selected {
-    background: rgba(255,255,255,0.25); color: #fff; font-weight: bold;
-    border-color: rgba(255,255,255,0.5);
-    box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+    background: rgba(255, 255, 255, 0.25);
+    color: #fff;
+    font-weight: bold;
+    border-color: rgba(255, 255, 255, 0.5);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
 }
 
 .lyric-selection-header {
-    font-size: 16px; font-weight: 700; color: #fff; margin-bottom: 20px;
-    text-align: center; border-bottom: 1px solid rgba(255,255,255,0.1);
+    font-size: 16px;
+    font-weight: 700;
+    color: #fff;
+    margin-bottom: 20px;
+    text-align: center;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
     padding-bottom: 10px;
 }
 
-/* --- チェキエディタ & 歌詞選択 --- */
 #cheki-editor-overlay {
-    position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
-    background: rgba(0,0,0,0.9); z-index: 2147483655;
-    display: flex; align-items: center; justify-content: center;
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    background: rgba(0, 0, 0, 0.9);
+    z-index: 2147483655;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     backdrop-filter: blur(20px);
 }
 
 .cheki-container {
-    display: flex; gap: 40px; max-width: 95vw; height: 90vh;
+    display: flex;
+    gap: 40px;
+    max-width: 95vw;
+    height: 90vh;
     align-items: center;
 }
 
-/* プレビューエリア（左） */
 .cheki-preview-box {
-    height: 100%; display: flex; flex-direction: column; justify-content: center;
-    flex: 1; min-width: 0; 
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    flex: 1;
+    min-width: 0;
 }
+
 .cheki-preview-img {
-    max-height: 85vh; max-width: 100%; object-fit: contain;
-    box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+    max-height: 85vh;
+    max-width: 100%;
+    object-fit: contain;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
     border-radius: 4px;
 }
 
-/* 操作パネル（右） */
 .cheki-controls {
-    width: 380px; display: flex; flex-direction: column; gap: 20px;
-    background: rgba(30,30,30,0.6); padding: 30px; border-radius: 24px;
-    border: 1px solid rgba(255,255,255,0.1);
-    max-height: 85vh; overflow-y: auto;
+    width: 380px;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+    background: rgba(30, 30, 30, 0.6);
+    padding: 30px;
+    border-radius: 24px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    max-height: 85vh;
+    overflow-y: auto;
     backdrop-filter: blur(40px);
 }
 
-.cheki-group-title { font-size: 13px; font-weight: bold; color: rgba(255,255,255,0.5); margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.05em; }
+.cheki-group-title {
+    font-size: 13px;
+    font-weight: bold;
+    color: rgba(255, 255, 255, 0.5);
+    margin-bottom: 8px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
 
 .cheki-input {
-    width: 100%; background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.15);
-    padding: 12px; border-radius: 8px; color: #fff; font-size: 15px; outline: none;
-    box-sizing: border-box; transition: border-color 0.2s;
+    width: 100%;
+    background: rgba(0, 0, 0, 0.3);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    padding: 12px;
+    border-radius: 8px;
+    color: #fff;
+    font-size: 15px;
+    outline: none;
+    box-sizing: border-box;
+    transition: border-color 0.2s;
 }
-.cheki-input:focus { border-color: rgba(255,255,255,0.5); }
 
-/* 歌詞リスト */
+.cheki-input:focus {
+    border-color: rgba(255, 255, 255, 0.5);
+}
+
 .cheki-lyrics-list {
-    flex: 1; overflow-y: auto; min-height: 150px;
-    background: rgba(0,0,0,0.2); border-radius: 12px; padding: 10px;
-    border: 1px solid rgba(255,255,255,0.05);
+    flex: 1;
+    overflow-y: auto;
+    min-height: 150px;
+    background: rgba(0, 0, 0, 0.2);
+    border-radius: 12px;
+    padding: 10px;
+    border: 1px solid rgba(255, 255, 255, 0.05);
 }
+
 .cheki-lyric-item {
-    padding: 10px 12px; margin-bottom: 4px; border-radius: 6px;
-    cursor: pointer; font-size: 13px; color: rgba(255,255,255,0.6);
-    transition: all 0.1s; line-height: 1.4;
+    padding: 10px 12px;
+    margin-bottom: 4px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+    color: rgba(255, 255, 255, 0.6);
+    transition: all 0.1s;
+    line-height: 1.4;
 }
-.cheki-lyric-item:hover { background: rgba(255,255,255,0.1); color: #fff; }
+
+.cheki-lyric-item:hover {
+    background: rgba(255, 255, 255, 0.1);
+    color: #fff;
+}
+
 .cheki-lyric-item.selected {
-    background: rgba(255,255,255,0.9); color: #000; font-weight: bold;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+    background: rgba(255, 255, 255, 0.9);
+    color: #000;
+    font-weight: bold;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
 }
 
-.cheki-actions { display: flex; gap: 10px; margin-top: auto; }
+.cheki-actions {
+    display: flex;
+    gap: 10px;
+    margin-top: auto;
+}
+
 .cheki-btn {
-    flex: 1; padding: 14px; border-radius: 30px; border: none; font-size: 14px;
-    font-weight: bold; cursor: pointer; transition: transform 0.1s, opacity 0.2s;
-    display: flex; align-items: center; justify-content: center; gap: 8px;
+    flex: 1;
+    padding: 14px;
+    border-radius: 30px;
+    border: none;
+    font-size: 14px;
+    font-weight: bold;
+    cursor: pointer;
+    transition: transform 0.1s, opacity 0.2s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
 }
-.cheki-btn:active { transform: scale(0.96); }
-.cheki-btn.primary { background: #fff; color: #000; }
-.cheki-btn.secondary { background: rgba(255,255,255,0.1); color: #fff; }
-.cheki-btn.save { background: #007AFF; color: #fff; }
 
-/* 結果モーダル用 */
-.result-row { display: flex; gap: 15px; margin-top: 25px; }
+.cheki-btn:active {
+    transform: scale(0.96);
+}
+
+.cheki-btn.primary {
+    background: #fff;
+    color: #000;
+}
+
+.cheki-btn.secondary {
+    background: rgba(255, 255, 255, 0.1);
+    color: #fff;
+}
+
+.cheki-btn.save {
+    background: #007AFF;
+    color: #fff;
+}
+
+.result-row {
+    display: flex;
+    gap: 15px;
+    margin-top: 25px;
+}
 
 #mv-next-list {
     min-height: 200px;
@@ -550,231 +905,815 @@
     }
 }
 
-/* 全画面問題解決までの暫定的措置 */
-#mv-sidebar, #mv-sidebar-trigger {
+#mv-sidebar,
+#mv-sidebar-trigger {
     display: none !important;
 }
 
-
-
-/* 背景 */
 #mv-root-container.record-mode #mv-overlay-content {
     background: radial-gradient(circle at center, #1c1c1c 0%, #050505 90%);
     transition: background 0.5s ease, backdrop-filter 0.5s ease;
 }
 
-/* Glassモード設定 */
-#mv-root-container { --glass-blur: 10px; --glass-opacity: 0.3; }
+#mv-root-container {
+    --glass-blur: 10px;
+    --glass-opacity: 0.3;
+}
+
 #mv-root-container.record-mode.glass-mode #mv-overlay-content {
     background: rgba(0, 0, 0, var(--glass-opacity));
-    backdrop-filter: blur(var(--glass-blur)); -webkit-backdrop-filter: blur(var(--glass-blur));
+    backdrop-filter: blur(var(--glass-blur));
+    -webkit-backdrop-filter: blur(var(--glass-blur));
     transition: background 0.1s;
 }
 
-/* UI隠蔽 */
 #mv-root-container.record-mode #mv-info-area,
 #mv-root-container.record-mode #mv-lyrics-area,
 #mv-root-container.record-mode #mv-lyrics-header,
 #mv-root-container.record-mode #mv-pin-btn {
-    opacity: 0 !important; pointer-events: none;
+    opacity: 0 !important;
+    pointer-events: none;
 }
 
-/* レイアウト */
 .record-mode-layout {
-    display: flex; width: 92vw; height: 92vh;
-    align-items: center; justify-content: center;
-    gap: 4vw; opacity: 0; transition: opacity 0.6s cubic-bezier(0.16, 1, 0.3, 1);
-    pointer-events: none; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    display: flex;
+    width: 92vw;
+    height: 92vh;
+    align-items: center;
+    justify-content: center;
+    gap: 4vw;
+    opacity: 0;
+    transition: opacity 0.6s cubic-bezier(0.16, 1, 0.3, 1);
+    pointer-events: none;
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
 }
-#mv-root-container.record-mode .record-mode-layout { opacity: 1; pointer-events: auto; }
 
-/* 左側：テキスト */
+#mv-root-container.record-mode .record-mode-layout {
+    opacity: 1;
+    pointer-events: auto;
+}
+
 .rm-left-pane {
-    flex: 1.3; max-width: 900px; padding-left: 40px;
-    display: flex; flex-direction: column; justify-content: center; text-align: left; height: 100%; z-index: 2;
-}
-.rm-title {
-    font-size: clamp(42px, 5.5vw, 76px); font-weight: 800; line-height: 1.2; margin-bottom: 16px; color: #fff;
-    text-shadow: 0 4px 20px rgba(0,0,0,0.6); letter-spacing: -0.02em; word-break: keep-all; overflow-wrap: break-word;
-}
-.rm-artist {
-    font-size: clamp(22px, 2.8vw, 34px); font-weight: 500; color: rgba(255,255,255,0.6);
-    margin-bottom: 50px; text-transform: uppercase; letter-spacing: 0.05em;
+    flex: 1.3;
+    max-width: 900px;
+    padding-left: 40px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    text-align: left;
+    height: 100%;
+    z-index: 2;
 }
 
-/* 歌詞エリア */
+.rm-title {
+    font-size: clamp(42px, 5.5vw, 76px);
+    font-weight: 800;
+    line-height: 1.2;
+    margin-bottom: 16px;
+    color: #fff;
+    text-shadow: 0 4px 20px rgba(0, 0, 0, 0.6);
+    letter-spacing: -0.02em;
+    word-break: keep-all;
+    overflow-wrap: break-word;
+}
+
+.rm-artist {
+    font-size: clamp(22px, 2.8vw, 34px);
+    font-weight: 500;
+    color: rgba(255, 255, 255, 0.6);
+    margin-bottom: 50px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
 .rm-lyrics-container {
-    height: 55vh; overflow-y: hidden; position: relative;
+    height: 55vh;
+    overflow-y: hidden;
+    position: relative;
     mask-image: linear-gradient(to bottom, transparent 0%, black 20%, black 80%, transparent 100%);
     -webkit-mask-image: linear-gradient(to bottom, transparent 0%, black 20%, black 80%, transparent 100%);
 }
-.rm-lyrics-scroll { transition: transform 0.6s cubic-bezier(0.2, 0.8, 0.2, 1); will-change: transform; }
-.rm-lyric-line {
-    font-size: clamp(26px, 3.2vw, 40px); font-weight: 700; color: rgba(255,255,255,0.3);
-    margin: 22px 0; transition: all 0.4s cubic-bezier(0.2, 0.8, 0.2, 1);
-    transform-origin: left center; cursor: pointer; line-height: 1.4; filter: blur(1px);
-}
-.rm-lyric-line.active {
-    color: #fff; transform: scale(1.15); text-shadow: 0 2px 10px rgba(0,0,0,0.5); filter: blur(0); opacity: 1;
+
+.rm-lyrics-scroll {
+    transition: transform 0.6s cubic-bezier(0.2, 0.8, 0.2, 1);
+    will-change: transform;
 }
 
-/* レコード盤面  */
+.rm-lyric-line {
+    font-size: clamp(26px, 3.2vw, 40px);
+    font-weight: 700;
+    color: rgba(255, 255, 255, 0.3);
+    margin: 22px 0;
+    transition: all 0.4s cubic-bezier(0.2, 0.8, 0.2, 1);
+    transform-origin: left center;
+    cursor: pointer;
+    line-height: 1.4;
+    filter: blur(1px);
+}
+
+.rm-lyric-line.active {
+    color: #fff;
+    transform: scale(1.15);
+    text-shadow: 0 2px 10px rgba(0, 0, 0, 0.5);
+    filter: blur(0);
+    opacity: 1;
+}
+
 .vinyl-record {
-    width: 60vh; height: 60vh; max-width: 650px; max-height: 650px;
+    width: 60vh;
+    height: 60vh;
+    max-width: 650px;
+    max-height: 650px;
     border-radius: 50%;
     background-color: #050505;
-    
-    /* 溝の表現：コントラストを上げてはっきりさせる */
-    background-image: repeating-radial-gradient(
-        #050505 0, 
-        #050505 2px, 
-        #252525 3px,  /* ここを明るくして溝を見えるように */
-        #050505 4px
-    );
-    
-    /* エッジの鋭い光と、全体の影 */
-    box-shadow: 
-        0 20px 50px rgba(0,0,0,0.8), 
-        inset 0 0 0 1px rgba(255,255,255,0.15), 
-        inset 0 0 0 4px rgba(0,0,0,0.8); 
-        
-    position: relative; display: flex; align-items: center; justify-content: center;
+
+    background-image: repeating-radial-gradient(#050505 0,
+            #050505 2px,
+            #252525 3px,
+
+            #050505 4px);
+
+    box-shadow:
+        0 20px 50px rgba(0, 0, 0, 0.8),
+        inset 0 0 0 1px rgba(255, 255, 255, 0.15),
+        inset 0 0 0 4px rgba(0, 0, 0, 0.8);
+
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     z-index: 2;
-    animation: vinyl-spin 6s linear infinite; animation-play-state: paused;
+    animation: vinyl-spin 6s linear infinite;
+    animation-play-state: paused;
 }
 
-/* 光の反射 */
 .vinyl-record::after {
-    content: ''; position: absolute; inset: 0; border-radius: 50%;
-    
-    /* X字型の強い反射を作る */
-    background: 
-        conic-gradient(
-            from 45deg, 
-            transparent 0%, 
-            rgba(255,255,255,0.2) 15%, 
-            transparent 30%, 
-            transparent 50%, 
-            rgba(255,255,255,0.2) 65%, 
-            transparent 80%
-        );
-        
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
 
-    mix-blend-mode: plus-lighter; 
+    background:
+        conic-gradient(from 45deg,
+            transparent 0%,
+            rgba(255, 255, 255, 0.2) 15%,
+            transparent 30%,
+            transparent 50%,
+            rgba(255, 255, 255, 0.2) 65%,
+            transparent 80%);
+
+    mix-blend-mode: plus-lighter;
     pointer-events: none;
-    
 
-    mask-image: radial-gradient(circle, black 30%, transparent 80%); }
+    mask-image: radial-gradient(circle, black 30%, transparent 80%);
+}
 
-/* 第2の反射層 */
 .vinyl-record::before {
-    content: ''; position: absolute; inset: 0; border-radius: 50%;
-    z-index: 1; pointer-events: none;
-    
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    z-index: 1;
+    pointer-events: none;
+
     background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)' opacity='0.08'/%3E%3C/svg%3E");
-    
-    /* 全体にかかる緩やかな光沢 */
-    background: linear-gradient(135deg, rgba(255,255,255,0.1) 0%, transparent 50%, rgba(255,255,255,0.05) 100%);
+
+    background: linear-gradient(135deg, rgba(255, 255, 255, 0.1) 0%, transparent 50%, rgba(255, 255, 255, 0.05) 100%);
 }
 
-/* センターラベル */
 .vinyl-label {
-    width: 36%; height: 36%; border-radius: 50%;
-    background-size: cover; background-position: center; background-color: #222;
-    box-shadow: 
-        inset 0 0 0 1px rgba(255,255,255,0.15), 
-        inset 0 0 15px rgba(0,0,0,0.9), 
+    width: 36%;
+    height: 36%;
+    border-radius: 50%;
+    background-size: cover;
+    background-position: center;
+    background-color: #222;
+    box-shadow:
+        inset 0 0 0 1px rgba(255, 255, 255, 0.15),
+        inset 0 0 15px rgba(0, 0, 0, 0.9),
         0 0 0 2px #000;
-    position: relative; z-index: 3;
+    position: relative;
+    z-index: 3;
 }
-/* スピンドル */
+
 .vinyl-label::before {
-    content: ''; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
-    width: 14px; height: 14px; 
-    background: radial-gradient(circle at 30% 30%, #fff 0%, #888 100%); 
-    border-radius: 50%; border: 1px solid #333;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.8);
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 14px;
+    height: 14px;
+    background: radial-gradient(circle at 30% 30%, #fff 0%, #888 100%);
+    border-radius: 50%;
+    border: 1px solid #333;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
 }
 
-.vinyl-record.spinning { animation-play-state: running; }
-@keyframes vinyl-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+.vinyl-record.spinning {
+    animation-play-state: running;
+}
 
-/* トーンアーム  */
+@keyframes vinyl-spin {
+    from {
+        transform: rotate(0deg);
+    }
+
+    to {
+        transform: rotate(360deg);
+    }
+}
+
 .rm-tonearm-container {
-    position: absolute; 
-    /* 画面外に行かないよう下げる */
-    top: 5%; 
-    right: 20px;
-    
-    width: 220px; height: 450px; 
-    pointer-events: none; z-index: 20;
-    
+    position: absolute;
 
-    transform-origin: 160px 70px; 
-    
+    top: 5%;
+    right: 20px;
+
+    width: 220px;
+    height: 450px;
+    pointer-events: none;
+    z-index: 20;
+
+    transform-origin: 160px 70px;
 
     transform: rotate(-35deg);
-    
+
     transition: transform 1.5s cubic-bezier(0.25, 1, 0.5, 1);
-    filter: drop-shadow(8px 15px 25px rgba(0,0,0,0.6));
+    filter: drop-shadow(8px 15px 25px rgba(0, 0, 0, 0.6));
 }
 
-
-.rm-right-pane.playing .rm-tonearm-container { 
-    transform: rotate(22deg); 
+.rm-right-pane.playing .rm-tonearm-container {
+    transform: rotate(22deg);
 }
 
-/* --- 以下、パーツのデザイン --- */
 .arm-base {
-    position: absolute; top: 25px; left: 115px; width: 90px; height: 90px; border-radius: 50%;
+    position: absolute;
+    top: 25px;
+    left: 115px;
+    width: 90px;
+    height: 90px;
+    border-radius: 50%;
     background: conic-gradient(from 135deg, #333, #111, #444, #111, #333);
-    border: 1px solid #555; z-index: 25; box-shadow: inset 0 2px 5px rgba(255,255,255,0.1), 0 5px 15px rgba(0,0,0,0.8);
+    border: 1px solid #555;
+    z-index: 25;
+    box-shadow: inset 0 2px 5px rgba(255, 255, 255, 0.1), 0 5px 15px rgba(0, 0, 0, 0.8);
 }
+
 .arm-base::after {
-    content: ''; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
-    width: 60px; height: 60px; border-radius: 50%; background: radial-gradient(circle at 30% 30%, #666, #222); border: 1px solid #000;
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 60px;
+    height: 60px;
+    border-radius: 50%;
+    background: radial-gradient(circle at 30% 30%, #666, #222);
+    border: 1px solid #000;
 }
+
 .arm-pipe {
-    position: absolute; top: 70px; left: 153px; width: 14px; height: 260px;
+    position: absolute;
+    top: 70px;
+    left: 153px;
+    width: 14px;
+    height: 260px;
     background: linear-gradient(90deg, #555, #bbb 20%, #ddd 45%, #999 55%, #444 100%);
-    border-radius: 4px; transform-origin: top center; transform: rotate(-5deg); z-index: 24;
+    border-radius: 4px;
+    transform-origin: top center;
+    transform: rotate(-5deg);
+    z-index: 24;
 }
+
 .arm-weight {
-    position: absolute; top: -45px; left: -15px; width: 44px; height: 50px;
-    background: linear-gradient(90deg, #222, #555 40%, #222); border-radius: 4px; border: 1px solid #111;
-    background-image: repeating-linear-gradient(to bottom, transparent 0, transparent 8px, rgba(255,255,255,0.2) 9px, transparent 10px);
+    position: absolute;
+    top: -45px;
+    left: -15px;
+    width: 44px;
+    height: 50px;
+    background: linear-gradient(90deg, #222, #555 40%, #222);
+    border-radius: 4px;
+    border: 1px solid #111;
+    background-image: repeating-linear-gradient(to bottom, transparent 0, transparent 8px, rgba(255, 255, 255, 0.2) 9px, transparent 10px);
 }
+
 .arm-headshell {
-    position: absolute; bottom: -12px; left: -7px; width: 28px; height: 58px; background: #1a1a1a; border: 1px solid #333;
-    transform: rotate(25deg); border-radius: 2px; transform-origin: center bottom;
+    position: absolute;
+    bottom: -12px;
+    left: -7px;
+    width: 28px;
+    height: 58px;
+    background: #1a1a1a;
+    border: 1px solid #333;
+    transform: rotate(25deg);
+    border-radius: 2px;
+    transform-origin: center bottom;
     background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)' opacity='0.1'/%3E%3C/svg%3E");
 }
-.arm-headshell::after {
-    content: ''; position: absolute; bottom: -6px; left: 8px; width: 12px; height: 16px; background: #eee; border-radius: 2px; box-shadow: 0 2px 5px rgba(0,0,0,0.5);
-}
-.arm-headshell::before {
-    content: ''; position: absolute; right: -8px; bottom: 15px; width: 8px; height: 25px; border-right: 3px solid #888; border-top: 3px solid #888; border-radius: 0 5px 0 0; transform: skewX(-10deg);
-}
-.rm-right-pane.playing .arm-headshell { animation: needle-vibrate 0.08s ease-in-out infinite alternate; }
-@keyframes needle-vibrate { from { transform: rotate(25deg) translate(0, 0); } to { transform: rotate(25deg) translate(0.5px, 0.3px); } }
 
-/* ボタン・スライダー設定 */
-#mv-record-btn, #mv-glass-btn, #mv-glass-slider-container {
-    position: absolute; top: 40px; z-index: 20; opacity: 0; pointer-events: none;
-    transition: opacity 0.4s ease, transform 0.3s ease;
+.arm-headshell::after {
+    content: '';
+    position: absolute;
+    bottom: -6px;
+    left: 8px;
+    width: 12px;
+    height: 16px;
+    background: #eee;
+    border-radius: 2px;
+    box-shadow: 0 2px 5px rgba(0, 0, 0, 0.5);
 }
-#mv-record-btn, #mv-glass-btn { padding: 10px 24px; border-radius: 30px; font-size: 13px; }
-#mv-record-btn { right: 260px; }
-#mv-glass-btn { right: 380px; }
-#mv-record-btn.visible, #mv-glass-btn.visible { opacity: 1; pointer-events: auto; }
-#mv-glass-btn.active { background: rgba(255,255,255,0.9); color: #000; box-shadow: 0 0 15px rgba(255,255,255,0.4); }
-#mv-glass-slider-container { right: 500px; top: 48px; width: 140px; display: flex; align-items: center; }
-#mv-root-container.record-mode.glass-mode #mv-glass-slider-container { opacity: 0; pointer-events: none; }
-#mv-root-container.record-mode.glass-mode #mv-glass-slider-container.visible { opacity: 1; pointer-events: auto; }
+
+.arm-headshell::before {
+    content: '';
+    position: absolute;
+    right: -8px;
+    bottom: 15px;
+    width: 8px;
+    height: 25px;
+    border-right: 3px solid #888;
+    border-top: 3px solid #888;
+    border-radius: 0 5px 0 0;
+    transform: skewX(-10deg);
+}
+
+.rm-right-pane.playing .arm-headshell {
+    animation: needle-vibrate 0.08s ease-in-out infinite alternate;
+}
+
+@keyframes needle-vibrate {
+    from {
+        transform: rotate(25deg) translate(0, 0);
+    }
+
+    to {
+        transform: rotate(25deg) translate(0.5px, 0.3px);
+    }
+}
+
+#mv-record-btn,
+#mv-glass-btn,
+#mv-glass-slider-container {
+    position: absolute;
+    top: 30px;
+    z-index: 20;
+    opacity: 0;
+    pointer-events: none;
+    transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+#mv-record-btn,
+#mv-glass-btn {
+    height: 42px;
+    padding: 0 20px;
+    border-radius: 24px;
+    font-size: 13px;
+    display: flex;
+    align-items: center;
+}
+
+#mv-record-btn {
+    right: 230px;
+}
+
+#mv-glass-btn {
+    right: 350px;
+}
+
+#mv-record-btn.visible,
+#mv-glass-btn.visible {
+    opacity: 1;
+    pointer-events: auto;
+}
+
+#mv-glass-btn.active {
+    background: rgba(255, 255, 255, 0.95);
+    color: #000;
+    box-shadow: 0 0 25px rgba(255, 255, 255, 0.3), inset 0 1px 2px rgba(0, 0, 0, 0.1);
+}
+
+#mv-glass-slider-container {
+    right: 490px;
+    top: 39px;
+    width: 140px;
+    display: flex;
+    align-items: center;
+}
+
+#mv-root-container.record-mode.glass-mode #mv-glass-slider-container {
+    opacity: 0;
+    pointer-events: none;
+}
+
+#mv-root-container.record-mode.glass-mode #mv-glass-slider-container.visible {
+    opacity: 1;
+    pointer-events: auto;
+}
+
 #mv-glass-slider {
-    -webkit-appearance: none; width: 100%; height: 4px; background: rgba(255,255,255,0.2); border-radius: 2px; outline: none; cursor: pointer;
+    -webkit-appearance: none;
+    appearance: none;
+    width: 100%;
+    height: 4px;
+    background: rgba(255, 255, 255, 0.15);
+    border-radius: 2px;
+    outline: none;
+    cursor: pointer;
 }
+
 #mv-glass-slider::-webkit-slider-thumb {
-    -webkit-appearance: none; appearance: none; width: 16px; height: 16px; border-radius: 50%; background: #fff; cursor: pointer; box-shadow: 0 2px 5px rgba(0,0,0,0.3); transition: transform 0.1s;
+    -webkit-appearance: none;
+    appearance: none;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, #fff 0%, #f0f0f0 100%);
+    cursor: pointer;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3), inset 0 1px 1px rgba(255, 255, 255, 0.5);
+    transition: all 0.2s;
 }
-#mv-glass-slider::-webkit-slider-thumb:hover { transform: scale(1.2); }
+
+#mv-glass-slider::-webkit-slider-thumb:hover {
+    transform: scale(1.15);
+    box-shadow: 0 3px 12px rgba(0, 0, 0, 0.4), inset 0 1px 1px rgba(255, 255, 255, 0.5);
+}
+
+#ipod-pip-container {
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    background: transparent;
+
+    overflow: hidden;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    user-select: none;
+}
+
+.ipod-pip-body {
+    margin: 0;
+    padding: 0;
+    width: 100vw;
+    height: 100vh;
+    overflow: hidden;
+    background: linear-gradient(to bottom, #dcdcdc 0%, #e8e8e8 5%, #c8c8c8 100%);
+}
+
+#ipod-pip-container .ipod-chassis {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: space-between;
+
+    padding: 20px 15px 30px 15px;
+    box-sizing: border-box;
+    position: relative;
+
+    background:
+        url('data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI1IiBoZWlnaHQ9IjUiPgo8cmVjdCB3aWR0aD0iNSIgaGVpZ2h0PSI1IiBmaWxsPSIjZmZmIiBmaWxsLW9wYWNpdHk9IjAuMDMiLz4KPC9zdmc+'),
+
+        linear-gradient(to right,
+            rgba(255, 255, 255, 0.4) 0%,
+            rgba(255, 255, 255, 0.1) 10%,
+            rgba(0, 0, 0, 0.05) 50%,
+            rgba(255, 255, 255, 0.1) 90%,
+            rgba(255, 255, 255, 0.4) 100%),
+        linear-gradient(to bottom, #dcdcdc 0%, #d4d4d4 100%);
+    background-blend-mode: overlay, normal, normal;
+}
+
+#ipod-pip-container .ipod-chassis::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    box-shadow: inset 0 0 20px rgba(0, 0, 0, 0.15);
+    pointer-events: none;
+    z-index: 10;
+}
+
+.ipod-screen-frame {
+    width: 100%;
+    flex: 1;
+
+    max-height: 55%;
+
+    background: #000;
+    border-radius: 8px;
+    padding: 2px;
+    box-shadow:
+        inset 0 2px 6px rgba(0, 0, 0, 0.6),
+
+        0 1px 0 rgba(255, 255, 255, 0.3);
+
+    position: relative;
+    margin-bottom: 20px;
+    display: flex;
+    flex-direction: column;
+}
+
+.ipod-screen {
+    width: 100%;
+    height: 100%;
+    background: #fff;
+
+    border-radius: 6px;
+    position: relative;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+}
+
+.ipod-screen-glass {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 45%;
+    background: linear-gradient(to bottom, rgba(255, 255, 255, 0.15) 0%, rgba(255, 255, 255, 0.02) 100%);
+    border-radius: 6px 6px 60% 60% / 6px 6px 10px 10px;
+    pointer-events: none;
+    z-index: 20;
+}
+
+.ipod-header {
+    height: 22px;
+    background: linear-gradient(to bottom, #c5cad4 0%, #9ca2ae 100%);
+    border-bottom: 1px solid #7a808b;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0 8px;
+    color: #000;
+    font-size: 10px;
+    font-weight: 700;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+    z-index: 5;
+}
+
+.ipod-battery-icon {
+    width: 18px;
+    height: 8px;
+    border: 1px solid #555;
+    border-radius: 2px;
+    position: relative;
+    padding: 1px;
+}
+
+.ipod-battery-icon::after {
+    content: '';
+    position: absolute;
+    right: -3px;
+    top: 2px;
+    width: 2px;
+    height: 4px;
+    background: #555;
+    border-radius: 0 1px 1px 0;
+}
+
+.ipod-battery-level {
+    width: 70%;
+    height: 100%;
+    background: linear-gradient(to bottom, #86e066 0%, #3dc112 100%);
+}
+
+.ipod-content-split {
+    flex: 1;
+    display: flex;
+    flex-direction: row;
+    background: #fff;
+    overflow: hidden;
+}
+
+.ipod-cover-art-large {
+    width: 50%;
+    height: 100%;
+    display: flex;
+    align-items: flex-start;
+
+    justify-content: center;
+    position: relative;
+    border-right: 1px solid #ccc;
+
+    background: #fff;
+
+    padding-top: 15px;
+
+    box-sizing: border-box;
+}
+
+.ipod-real-art {
+    width: 80%;
+    aspect-ratio: 1 / 1;
+    object-fit: cover;
+    box-shadow: 0 5px 10px rgba(0, 0, 0, 0.4);
+
+    -webkit-box-reflect: below 2px linear-gradient(to bottom, rgba(0, 0, 0, 0) 80%, rgba(255, 255, 255, 0.4));
+}
+
+.ipod-info-side {
+    width: 50%;
+    display: flex;
+    flex-direction: column;
+    padding: 0 12px;
+    box-sizing: border-box;
+    background: linear-gradient(to bottom, #fcfcfc 0%, #f0f0f0 100%);
+    justify-content: center;
+}
+
+.ipod-track-info {
+    flex: 1;
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    text-align: left;
+}
+
+.ipod-text-title {
+    font-size: 13px;
+    font-weight: 700;
+    color: #000;
+    margin-bottom: 4px;
+    line-height: 1.2;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
+}
+
+.ipod-text-artist {
+    font-size: 11px;
+    color: #666;
+    margin-bottom: 2px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.ipod-text-album {
+    font-size: 10px;
+    color: #888;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.ipod-progress-area {
+    padding: 8px 10px;
+    background: linear-gradient(to bottom, #f0f0f0 0%, #e0e0e0 100%);
+    border-top: 1px solid #d0d0d0;
+}
+
+.ipod-scrubber-bar {
+    width: 100%;
+    height: 8px;
+    background: #d4d4d4;
+    border-radius: 4px;
+    box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.2);
+    overflow: hidden;
+    position: relative;
+    cursor: pointer;
+}
+
+.ipod-scrubber-fill {
+    width: 0%;
+    height: 100%;
+    background: linear-gradient(to bottom, #89c4f4 0%, #54a3ee 50%, #3690f0 51%, #1e69de 100%);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.4);
+    transition: width 0.2s linear;
+}
+
+.ipod-time-labels {
+    display: flex;
+    justify-content: space-between;
+    font-size: 9px;
+    color: #555;
+    margin-top: 3px;
+    font-weight: 600;
+}
+
+.ipod-wheel-area {
+    flex: 0 0 auto;
+    width: 100%;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    padding-bottom: 10px;
+}
+
+.ipod-click-wheel {
+    width: 160px;
+    height: 160px;
+    background: #1a1a1a;
+    border-radius: 50%;
+    position: relative;
+    box-shadow:
+        0 1px 4px rgba(0, 0, 0, 0.5),
+
+        inset 0 1px 2px rgba(0, 0, 0, 0.4);
+
+    background: linear-gradient(to bottom, #2b2b2b 0%, #111111 100%);
+    cursor: pointer;
+}
+
+.ipod-click-wheel:active {
+    transform: scale(0.995);
+}
+
+.ipod-center-btn {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 54px;
+    height: 54px;
+    border-radius: 50%;
+
+    background: linear-gradient(to bottom, #e6e6e6 0%, #d0d0d0 100%);
+    box-shadow:
+        0 1px 3px rgba(0, 0, 0, 0.6),
+        inset 0 1px 1px rgba(255, 255, 255, 0.9);
+    cursor: pointer;
+    transition: all 0.1s;
+}
+
+.ipod-center-btn:active {
+    background: linear-gradient(to bottom, #c0c0c0 0%, #d0d0d0 100%);
+    box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.3);
+}
+
+.wheel-label {
+    position: absolute;
+    color: #999;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    pointer-events: auto;
+
+    cursor: pointer;
+    font-family: "SF Pro Text", "Helvetica Neue", sans-serif;
+    z-index: 10;
+
+    display: flex;
+    justify-content: center;
+    align-items: center;
+}
+
+.wheel-label::before {
+    content: '';
+    position: absolute;
+    top: -15px;
+    left: -15px;
+    right: -15px;
+    bottom: -15px;
+}
+
+.wheel-label:active {
+    opacity: 0.7;
+}
+
+.label-menu {
+    top: 22px;
+
+    left: 50%;
+    transform: translateX(-50%);
+}
+
+.label-play {
+    bottom: 22px;
+
+    left: 50%;
+    transform: translateX(-50%);
+    gap: 4px;
+}
+
+.label-prev {
+    top: 50%;
+    left: 20px;
+    transform: translateY(-50%);
+}
+
+.label-next {
+    top: 50%;
+    right: 20px;
+    transform: translateY(-50%);
+}
+
+.wheel-icon {
+    fill: #999;
+    width: 12px;
+    height: 12px;
+}

@@ -1,4 +1,4 @@
-# YouTube Immersion (Beta)
+# YT Immersion (Beta)
 
 > YouTubeのMVを、Apple Music風のスタイリッシュな歌詞表示で楽しむためのChrome拡張機能です。
 > 現在ベータ版として開発中です。

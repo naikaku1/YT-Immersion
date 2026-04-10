@@ -49,13 +49,6 @@ YouTubeのMVを、Apple Music風のスタイリッシュな歌詞表示で楽し
 ##  ライセンスとクレジット
 
 本プロジェクトは **MIT License** のもとで公開されています。詳細は `LICENSE` ファイルをご確認ください。
-
-### 使用ライブラリ (Third Party Credits)
-本拡張機能は、以下の素晴らしいオープンソースライブラリを使用しています。
-
-* PeerJS (MIT License) - デバイス間通信の実装に使用
-* QRCode.js (MIT License) - 接続用QRコードの生成に使用
-
 ---
 
 ### 🤝 貢献について

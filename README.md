@@ -1,69 +1,83 @@
 # YT Immersion (Beta)
 
-> YouTubeのMVを、Apple Music風のスタイリッシュな歌詞表示で楽しむためのChrome拡張機能です。
-> 現在ベータ版として開発中です。
+> **YouTubeを、もっと深く、もっと美しく。**
+> **Experience YouTube, Deeper and More Beautifully.**
+
+YT Immersionは、YouTubeのミュージックビデオをApple Music風のスタイリッシュなUIで楽しむためのChrome拡張機能です。Glassmorphismを取り入れたデザインにより、視覚的な没入感を提供します。
+
+YT Immersion is a Chrome extension designed to enhance your YouTube music video experience with a stylish, Apple Music-inspired UI. Featuring Glassmorphism design, it provides a truly immersive visual experience.
 
 ---
 
-## 主な機能
+## 主な機能 / Features
 
-* **スタイリッシュな歌詞表示**
-    * 動画の右下に、没入感のあるデザインで歌詞を表示します。
-    * 歌詞に合わせて自動でスクロールします。
+### 歌詞表示 / Lyrics Display
+- **没入型デザイン / Immersive Design**
+  - 背景に溶け込む歌詞表示と、楽曲に同期した滑らかなオートスクロール。
+  - Seamlessly integrated lyrics with smooth, real-time auto-scrolling.
+- **2言語表示対応 / Dual Language Support**
+  - 原文と訳詞の同時表示や切り替えに対応。
+  - Supports simultaneous display and switching between original and translated lyrics.
 
-* **シームレスな自動更新**
-    * 次の動画に進むと、自動的に歌詞と楽曲情報を更新します。
+### 推し活支援 / Fan Tools
+- **ベストショット撮影 / Best Shot Capture**
+  - バースト撮影（連写）からブレの少ないフレームを自動抽出。
+  - Automatically extracts the clearest frames using burst capture.
+- **チェキ風画像作成 / Instax-style Card Creator**
+  - 撮影したフレームにお好みの歌詞を添えてカードとして保存。
+  - Create and save custom cards with your favorite lyrics.
 
-* **タイトル自動整形**
-    * 「【MV full】」や「Official Music Video」などの余計な文字列を自動で除去し、楽曲名とアーティスト名だけを綺麗に表示します。
-
-* **PiP ウィンドウ**
-    * iPod風のリモコンでYouTubeを操作できます。
-
-* **ベストショット機能**
-    * ボタンを押した瞬間の前後を**バースト撮影（連写）**し、ブレの少ない鮮明なフレームを自動選出します。
-    * 選んだ写真に歌詞を添えた「チェキ風画像」として保存することも可能です。
-    * *※本機能は、推し活など個人的な利用の範囲でお楽しみください。*
-
-* **レコードモード**
-    * レコードモードを押していただくと、レコード風の再生画面を楽しむことができます。
-
----
-
-## インストール方法
-
-1. GitHubのリリースページ（またはZip）からファイルをダウンロードし、解凍します。
-2. Chromeブラウザを開き、アドレスバーに `chrome://extensions/` と入力します。
-3. 右上の **「デベロッパーモード」** をONにします。
-4. **「パッケージ化されていない拡張機能を読み込む」** をクリックし、解凍したフォルダを選択します。
+### 独自プレイヤー / Unique Players
+- **iPod風 PiP / iPod-style PiP**
+  - クラシックな操作感を楽しめるPiPプレイヤー。
+  - A nostalgic PiP player with classic controls.
+- **レコードモード / Record Mode**
+  - アナログレコードの質感を再現した再生画面。
+  - A playback screen replicating the aesthetic of vinyl records.
 
 ---
 
-## 使い方
+## インストール方法 / Installation
 
-1. YouTubeで好きなMVを開きます。
-2. 動画の概要欄などから **「文字起こしを表示」** を押し、文字起こしパネルを表示状態にします（初回のみ必要です）。
-3. プレイヤー下のコントロールバーに追加された **「MVモード」** ボタンをクリックします。
-4. 終了する時は、画面右上の「閉じる」ボタンか、キーボードの `Esc` キーを押してください。
-
----
-
-## 免責事項 (Disclaimer)
-
-* **個人情報の扱い**: 本拡張機能は、利用者の個人情報やパスワード、閲覧履歴などを収集・送信する仕組みは一切含んでいません。
-* **非公式ツール**: 本拡張機能は、YouTubeの閲覧体験を向上させることを目的とした個人の非公式制作物であり、Google LLCおよびYouTubeとは一切関係ありません。
-* **免責**: この拡張機能の使用によって利用者が被ったいかなる不利益や損害についても、開発者は一切の責任を負いません。
+1. [Releases](../../releases) から最新のソースコードをダウンロードし、解凍します。
+   Download and extract the latest source code from [Releases](../../releases).
+2. Chromeの拡張機能ページ（`chrome://extensions/`）を開きます。
+   Open `chrome://extensions/` in your Chrome browser.
+3. 「デベロッパーモード」をオンにします。
+   Enable "Developer mode".
+4. 「パッケージ化されていない拡張機能を読み込む」から解凍したフォルダを選択します。
+   Click "Load unpacked" and select the extracted folder.
 
 ---
 
-## ライセンスとクレジット
+## 使い方 / Usage
 
-本プロジェクトは **MIT License** のもとで公開されています。詳細は `LICENSE` ファイルをご確認ください。
+1. YouTubeでミュージックビデオを開きます。
+   Open a music video on YouTube.
+2. サイドパネルの「文字起こしを表示」をクリックして歌詞データをロードします。
+   Click "Show transcript" in the side panel to load lyrics data.
+3. プレイヤー下の「MVモード」ボタンから起動します。
+   Launch by clicking the "MV Mode" button below the player.
+4. 終了は「閉じる」ボタンまたは `Esc` キーで行います。
+   Exit using the close button or `Esc` key.
 
-### 貢献について
+---
 
-バグ報告や機能改善の提案は、GitHubの Issues または Pull Request にていつでも歓迎します。
+## 免責事項 / Disclaimer
 
-<br>
+- **プライバシー / Privacy**
+  - 本拡張機能は、利用者の個人情報を収集・送信することはありません。
+  - This extension does not collect or transmit any personal information.
+- **非公式 / Unofficial**
+  - 本プロジェクトは個人の制作物であり、Google LLCおよびYouTubeとは関係ありません。
+  - This is a personal project and is not affiliated with Google LLC or YouTube.
+- **保証 / Warranty**
+  - 本ツールの利用により生じた損害について、開発者は一切の責任を負いません。
+  - The developer assumes no responsibility for any damages resulting from the use of this tool.
 
-*Copyright (c) 2025 Naikaku*
+---
+
+## ライセンス / License
+
+MIT License
+Copyright (c) 2025 Naikaku

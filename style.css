@@ -949,9 +949,10 @@ html[data-mv-mode="true"] #comments {
 }
 
 #mv-root-container.record-mode.glass-mode #mv-overlay-content {
+  background: radial-gradient(circle at center, rgba(28, 28, 28, var(--glass-opacity)) 0%, rgba(5, 5, 5, var(--glass-opacity)) 90%);
   backdrop-filter: blur(var(--glass-blur));
   -webkit-backdrop-filter: blur(var(--glass-blur));
-  transition: background 0.1s
+  transition: background 0.1s;
 }
 
 #mv-root-container.record-mode #mv-info-area,
@@ -2196,11 +2197,6 @@ input:checked+.slider:before {
   padding-right: 15px !important;
 }
 
-.rm-lyric-line {
-  transform-origin: left center !important;
-  padding-left: 5px !important;
-}
-
 .lyric-line,
 .lyric-line-sub,
 .rm-lyric-line,
@@ -2212,6 +2208,12 @@ input:checked+.slider:before {
   transition: color 0.5s cubic-bezier(0.16, 1, 0.3, 1), transform 0.5s cubic-bezier(0.16, 1, 0.3, 1), text-shadow 0.5s cubic-bezier(0.16, 1, 0.3, 1) !important;
   will-change: transform, color, text-shadow;
   filter: none !important
+}
+
+
+.rm-lyric-line {
+  transform-origin: left center !important;
+  padding-left: 5px !important;
 }
 
 .lyric-line:hover,

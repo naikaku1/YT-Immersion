@@ -378,6 +378,7 @@ async function startMVMode(isAuto = false, isHotSwap = false) {
         const opacity = (val / 100) * 0.6;
         rootContainer.style.setProperty('--glass-blur', `${blurPx}px`);
         rootContainer.style.setProperty('--glass-opacity', opacity);
+        window.ytiLiquidGlass?.setIntensity?.(val / 100);
       };
       applyGlassEffect(glassSlider.value);
       glassSlider.oninput = (e) => {
@@ -508,6 +509,7 @@ async function startMVMode(isAuto = false, isHotSwap = false) {
       }
     }, 100);
     document.body.appendChild(rootContainer);
+    window.ytiLiquidGlass?.init?.(rootContainer, overlayContent);
     document.addEventListener('fullscreenchange', onFullscreenChange);
     document.addEventListener('mousemove', onUserAction);
     document.addEventListener('click', onUserAction);
@@ -543,6 +545,7 @@ function endMVMode(keepActive = false) {
   document.removeEventListener('fullscreenchange', onFullscreenChange);
   if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
   if (rootContainer) {
+    window.ytiLiquidGlass?.destroy?.();
     rootContainer.remove();
     rootContainer = null;
   }
@@ -2864,6 +2867,7 @@ function showResultModal(canvas) {
 
 function showToast(message) {
   const toast = document.createElement('div');
+  toast.className = 'mv-lg-toast';
   toast.innerText = message;
   Object.assign(toast.style, {
     position: 'fixed',

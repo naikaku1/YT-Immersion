@@ -38,6 +38,7 @@
         "style.css"
       ],
       "js": [
+        "liquid-glass.js",
         "content.js"
       ]
     }

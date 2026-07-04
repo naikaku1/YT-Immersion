@@ -81,3 +81,9 @@ YT Immersion is a Chrome extension designed to enhance your YouTube music video 
 
 MIT License
 Copyright (c) 2025 Naikaku
+
+---
+
+## Liquid Glass
+
+MV mode controls now use a Liquid Glass lens layer: Chromium gets SVG displacement-map refraction with subtle chromatic fringe, while unsupported environments fall back to the existing premium blur glass. Design reference: [Aave - Building Glass for the Web](https://aave.com/design/building-glass-for-the-web).

@@ -2239,3 +2239,91 @@ input:checked+.slider:before {
 .lyric-line-container.active {
   transform: scale(1) !important
 }
+
+/* Liquid Glass: Aave "Building Glass for the Web" style refraction layer.
+   JS injects SVG defs inside #mv-overlay-content; .lg-on is added only after
+   backdrop-filter:url(#...) and data:image probes succeed. */
+#mv-root-container.lg-defs .mv-glass-btn,
+#mv-root-container.lg-defs button.mv-lyric-action-btn,
+#mv-root-container.lg-defs #mv-center-status,
+#mv-root-container.lg-defs .mv-lg-toast,
+#mv-root-container.lg-defs .lyric-selection-container,
+#mv-root-container.lg-defs .cheki-controls {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  background: rgba(18, 20, 26, 0.34) !important;
+  border-color: rgba(255, 255, 255, 0.16) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.32),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.08),
+    0 14px 38px rgba(0, 0, 0, 0.36) !important;
+}
+
+#mv-root-container.lg-defs .mv-glass-btn::before,
+#mv-root-container.lg-defs button.mv-lyric-action-btn::before,
+#mv-root-container.lg-defs #mv-center-status::before,
+#mv-root-container.lg-defs .mv-lg-toast::before,
+#mv-root-container.lg-defs .lyric-selection-container::before,
+#mv-root-container.lg-defs .cheki-controls::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1px;
+  pointer-events: none;
+  background: linear-gradient(135deg,
+    rgba(255, 255, 255, 0.55),
+    rgba(255, 255, 255, 0.08) 35%,
+    rgba(255, 255, 255, 0.02) 65%,
+    rgba(255, 255, 255, 0.28));
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  mask-composite: exclude;
+  z-index: 2;
+}
+
+#mv-root-container.lg-defs .mv-glass-btn::after,
+#mv-root-container.lg-defs button.mv-lyric-action-btn::after,
+#mv-root-container.lg-defs #mv-center-status::after,
+#mv-root-container.lg-defs .mv-lg-toast::after,
+#mv-root-container.lg-defs .lyric-selection-container::after,
+#mv-root-container.lg-defs .cheki-controls::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  mix-blend-mode: screen;
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.22), transparent 34%);
+  filter: url(#yti-lg-grain);
+  z-index: 1;
+}
+
+#mv-root-container.lg-defs .mv-glass-btn > *,
+#mv-root-container.lg-defs button.mv-lyric-action-btn > *,
+#mv-root-container.lg-defs .cheki-controls > * {
+  position: relative;
+  z-index: 3;
+}
+
+#mv-root-container.lg-on .mv-glass-btn,
+#mv-root-container.lg-on button.mv-lyric-action-btn,
+#mv-root-container.lg-on #mv-center-status,
+#mv-root-container.lg-on .mv-lg-toast,
+#mv-root-container.lg-on .lyric-selection-container,
+#mv-root-container.lg-on .cheki-controls {
+  backdrop-filter: var(--yti-lg, blur(18px) saturate(1.55) brightness(1.06)) !important;
+  -webkit-backdrop-filter: var(--yti-lg, blur(18px) saturate(1.55) brightness(1.06)) !important;
+}
+
+#mv-root-container.ambient-active.lg-on .mv-glass-btn,
+#mv-root-container.ambient-active.lg-on button.mv-lyric-action-btn,
+#mv-root-container.ambient-active.lg-on #mv-center-status,
+#mv-root-container.ambient-active.lg-on .mv-lg-toast,
+#mv-root-container.ambient-active.lg-on .lyric-selection-container,
+#mv-root-container.ambient-active.lg-on .cheki-controls {
+  backdrop-filter: blur(18px) saturate(1.55) brightness(1.06) !important;
+  -webkit-backdrop-filter: blur(18px) saturate(1.55) brightness(1.06) !important;
+}

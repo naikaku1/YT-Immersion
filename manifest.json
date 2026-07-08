@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "YT Immersion",
-  "version": "0.9.6",
-  "description": "beta 5",
+  "version": "0.9.7",
+  "description": "beta 6",
   "permissions": [
     "scripting",
     "activeTab"
@@ -30,6 +30,17 @@
     "extension_pages": "script-src 'self'; object-src 'self'"
   },
   "content_scripts": [
+    {
+      "matches": [
+        "https://www.youtube.com/*"
+      ],
+      "js": [
+        "page_script.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN",
+      "all_frames": false
+    },
     {
       "matches": [
         "https://www.youtube.com/*"

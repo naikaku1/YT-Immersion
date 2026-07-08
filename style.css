@@ -93,10 +93,6 @@ html[data-mv-mode="true"] #comments {
   box-shadow: 0 2px 10px rgba(0, 0, 0, 0.2)
 }
 
-#mv-qr-btn {
-  display: none !important
-}
-
 #mv-close-btn {
   position: absolute;
   top: 30px;
@@ -234,78 +230,6 @@ html[data-mv-mode="true"] #comments {
   transform: translatez(0)
 }
 
-#mv-qr-overlay {
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
-  background: rgba(0, 0, 0, 0.6);
-  backdrop-filter: blur(10px);
-  z-index: 1000;
-  display: none;
-  align-items: center;
-  justify-content: center;
-  pointer-events: auto;
-  animation: fadeIn 0.3s ease
-}
-
-#mv-qr-card {
-  background: rgba(30, 30, 30, 0.85);
-  backdrop-filter: blur(30px);
-  -webkit-backdrop-filter: blur(30px);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  padding: 40px;
-  border-radius: 32px;
-  text-align: center;
-  color: #fff;
-  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.6);
-  transform: scale(0.95);
-  animation: popIn 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards;
-  position: relative;
-  max-width: 320px;
-  width: 100%
-}
-
-#mv-qr-card h3 {
-  margin: 0 0 20px 0;
-  font-size: 18px;
-  font-weight: 600;
-  letter-spacing: 0.05em;
-  color: rgba(255, 255, 255, 0.9)
-}
-
-#qrcode {
-  background: #fff;
-  padding: 15px;
-  border-radius: 16px;
-  display: inline-block;
-  box-shadow: 0 5px 15px rgba(0, 0, 0, 0.2)
-}
-
-#mv-qr-card p {
-  margin-top: 20px;
-  font-size: 12px;
-  color: rgba(255, 255, 255, 0.5)
-}
-
-.qr-close-btn {
-  margin-top: 25px;
-  width: 100%;
-  padding: 12px;
-  border-radius: 16px;
-  background: rgba(255, 255, 255, 0.1);
-  border: none;
-  color: #fff;
-  font-weight: 600;
-  cursor: pointer;
-  transition: background 0.2s
-}
-
-.qr-close-btn:hover {
-  background: rgba(255, 255, 255, 0.2)
-}
-
 #mv-sidebar-trigger {
   position: fixed;
   top: 0;
@@ -398,28 +322,6 @@ html[data-mv-mode="true"] #comments {
 .mv-next-artist {
   color: rgba(255, 255, 255, 0.5);
   font-size: 12px
-}
-
-@keyframes fadeIn {
-  from {
-    opacity: 0;
-  }
-
-  to {
-    opacity: 1;
-  }
-}
-
-@keyframes popIn {
-  from {
-    transform: scale(0.9);
-    opacity: 0;
-  }
-
-  to {
-    transform: scale(1);
-    opacity: 1;
-  }
 }
 
 .ytp-mv-mode-button {
@@ -525,11 +427,23 @@ html[data-mv-mode="true"] #comments {
   opacity: 1
 }
 
+/* #7 「歌詞なし」表示は画面下部に中央揃えで表示する */
 #mv-lyrics-area.no-lyrics {
-  display: flex;
-  flex-direction: column;
-  justify-content: flex-end;
-  padding-bottom: 40px;
+  left: 0 !important;
+  right: 0 !important;
+  width: 100% !important;
+  max-width: none !important;
+  height: auto !important;
+  top: auto !important;
+  bottom: 40px !important;
+  display: flex !important;
+  flex-direction: row;
+  justify-content: center;
+  align-items: flex-end;
+  text-align: center;
+  padding: 0 0 10px 0;
+  -webkit-mask-image: none;
+  mask-image: none;
   transition: opacity 0.5s ease
 }
 
@@ -537,29 +451,13 @@ html[data-mv-mode="true"] #comments {
   color: rgba(255, 255, 255, 0.4);
   font-size: 24px;
   font-weight: 700;
-  text-shadow: 0 2px 10px rgba(0, 0, 0, 0.5)
+  text-shadow: 0 2px 10px rgba(0, 0, 0, 0.5);
+  margin: 0
 }
 
 #mv-lyrics-area.fade-out {
   opacity: 0;
   pointer-events: none
-}
-
-.ytp-mv-shot-button {
-  opacity: 0.9;
-  font-weight: bold;
-  display: inline-block;
-  vertical-align: top;
-  margin-left: 8px;
-  line-height: 48px;
-  padding: 0 5px;
-  color: #fff;
-  font-size: 100%
-}
-
-.ytp-mv-shot-button:hover {
-  opacity: 1;
-  color: #fff
 }
 
 #mv-lyrics-header {
@@ -1478,97 +1376,104 @@ html[data-mv-mode="true"] #comments {
   background: linear-gradient(to bottom, #86e066 0%, #3dc112 100%)
 }
 
-.ipod-content-split {
-  flex: 1;
-  display: flex;
-  flex-direction: row;
-  background: #fff;
-  overflow: hidden
+.ipod-now-playing-label {
+  font-size: 9px;
+  font-weight: 700;
+  color: #333;
+  letter-spacing: 0.3px;
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.4)
 }
 
-.ipod-cover-art-large {
-  width: 50%;
+/* 動画がiPodの画面で再生されるステージ */
+.ipod-video-stage {
+  flex: 1;
+  position: relative;
+  background: #000;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 0
+}
+
+.ipod-video-stage .ipod-live-video,
+.ipod-live-video {
+  position: absolute !important;
+  top: 0 !important;
+  left: 0 !important;
+  width: 100% !important;
+  height: 100% !important;
+  max-width: 100% !important;
+  max-height: 100% !important;
+  object-fit: contain !important;
+  background: #000 !important;
+  transform: none !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  border: 0 !important;
+  z-index: 1
+}
+
+.ipod-video-placeholder {
+  width: 100%;
   height: 100%;
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: center;
-  position: relative;
-  border-right: 1px solid #ccc;
-  background: #fff;
-  padding-top: 15px;
-  box-sizing: border-box
+  background: radial-gradient(circle at 50% 38%, #333 0%, #111 100%);
+  color: rgba(255, 255, 255, 0.22)
 }
 
-.ipod-real-art {
-  width: 80%;
-  aspect-ratio: 1/1;
-  object-fit: cover;
-  box-shadow: 0 5px 10px rgba(0, 0, 0, 0.4);
-  -webkit-box-reflect: below 2px linear-gradient(to bottom, rgba(0, 0, 0, 0) 80%, rgba(255, 255, 255, 0.4))
+.ipod-video-placeholder svg {
+  width: 44px;
+  height: 44px;
+  fill: currentColor
 }
 
-.ipod-info-side {
-  width: 50%;
-  display: flex;
-  flex-direction: column;
-  padding: 0 12px;
-  box-sizing: border-box;
-  background: linear-gradient(to bottom, #fcfcfc 0%, #f0f0f0 100%);
-  justify-content: center
+/* 動画の上に重なる Now Playing 情報＋スクラバー */
+.ipod-np-overlay {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 15;
+  padding: 18px 10px 8px 10px;
+  background: linear-gradient(to bottom, rgba(0, 0, 0, 0) 0%, rgba(0, 0, 0, 0.55) 45%, rgba(0, 0, 0, 0.82) 100%);
+  color: #fff;
+  transition: opacity 0.4s ease
 }
 
-.ipod-track-info {
-  flex: 1;
-  padding: 10px;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  text-align: left
+.ipod-np-meta {
+  margin-bottom: 7px
 }
 
-.ipod-text-title {
-  font-size: 13px;
+.ipod-np-title {
+  font-size: 12px;
   font-weight: 700;
-  color: #000;
-  margin-bottom: 4px;
   line-height: 1.2;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis
+}
+
+.ipod-np-artist {
+  font-size: 10px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.72);
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
+  white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  line-clamp: 2;
-  -webkit-box-orient: vertical
-}
-
-.ipod-text-artist {
-  font-size: 11px;
-  color: #666;
-  margin-bottom: 2px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis
-}
-
-.ipod-text-album {
-  font-size: 10px;
-  color: #888;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis
-}
-
-.ipod-progress-area {
-  padding: 8px 10px;
-  background: linear-gradient(to bottom, #f0f0f0 0%, #e0e0e0 100%);
-  border-top: 1px solid #d0d0d0
+  margin-top: 2px
 }
 
 .ipod-scrubber-bar {
   width: 100%;
-  height: 8px;
-  background: #d4d4d4;
+  height: 6px;
+  background: rgba(255, 255, 255, 0.25);
   border-radius: 4px;
-  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.2);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.45);
   overflow: hidden;
   position: relative;
   cursor: pointer
@@ -1577,8 +1482,8 @@ html[data-mv-mode="true"] #comments {
 .ipod-scrubber-fill {
   width: 0%;
   height: 100%;
-  background: linear-gradient(to bottom, #89c4f4 0%, #54a3ee 50%, #3690f0 51%, #1e69de 100%);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.4);
+  background: linear-gradient(to bottom, #fdfdfd 0%, #d6d6d6 100%);
+  box-shadow: 0 0 5px rgba(255, 255, 255, 0.55);
   transition: width 0.2s linear
 }
 
@@ -1586,9 +1491,10 @@ html[data-mv-mode="true"] #comments {
   display: flex;
   justify-content: space-between;
   font-size: 9px;
-  color: #555;
-  margin-top: 3px;
-  font-weight: 600
+  color: rgba(255, 255, 255, 0.85);
+  margin-top: 4px;
+  font-weight: 600;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9)
 }
 
 .ipod-wheel-area {
@@ -2236,6 +2142,223 @@ input:checked+.slider:before {
   text-shadow: 0 0 10px rgba(255, 255, 255, 0.2) !important
 }
 
+/* ===== カラオケ風ハイライト（Apple Music的な歌い出し追従） =====
+   アクティブ行の文字色を透明にし、--yti-fill(0..1) 位置までグラデーションで
+   塗ったbackgroundを文字形にクリップして表示する。--yti-fill はrAFで毎フレーム更新。
+   間奏行（instrumental-line）はドットアニメーションを持つため対象外。 */
+#mv-root-container.karaoke-on .lyric-line-container.active:not(.instrumental-line) .lyric-line {
+  color: transparent !important;
+  background-image: linear-gradient(90deg,
+    #ffffff calc(var(--yti-fill, 0) * 100% - 10px),
+    rgba(255, 255, 255, 0.35) calc(var(--yti-fill, 0) * 100% + 10px)) !important;
+  -webkit-background-clip: text !important;
+  background-clip: text !important;
+  text-shadow: none !important;
+}
+
+#mv-root-container.karaoke-on .rm-lyric-line.active:not(.instrumental-line) {
+  color: transparent !important;
+  background-image: linear-gradient(90deg,
+    #ffffff calc(var(--yti-fill, 0) * 100% - 10px),
+    rgba(255, 255, 255, 0.35) calc(var(--yti-fill, 0) * 100% + 10px)) !important;
+  -webkit-background-clip: text !important;
+  background-clip: text !important;
+  text-shadow: none !important;
+}
+
+/* サブ（訳・ロマ字）は塗りの対象外：自身のcolor指定で通常表示を維持する */
+#mv-root-container.karaoke-on .lyric-line-container.active .lyric-line-sub,
+#mv-root-container.karaoke-on .rm-lyric-line.active .rm-lyric-line-sub {
+  background-image: none !important;
+}
+
 .lyric-line-container.active {
   transform: scale(1) !important
+}
+
+/* ===== 表示オプション（歯車）ボタン ===== */
+#mv-settings-btn {
+  height: 42px;
+  width: 42px;
+  padding: 0;
+  border-radius: 50%;
+  opacity: 0;
+  pointer-events: none;
+  transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+}
+#mv-settings-btn.visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* ===== 表示オプション パネル ===== */
+#mv-settings-panel {
+  position: absolute;
+  top: 84px;
+  right: 30px;
+  width: 320px;
+  max-width: 80vw;
+  background: rgba(18, 18, 20, 0.82);
+  backdrop-filter: blur(30px);
+  -webkit-backdrop-filter: blur(30px);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 16px;
+  box-shadow: 0 16px 50px rgba(0, 0, 0, 0.5);
+  padding: 10px;
+  z-index: 2100;
+  opacity: 0;
+  transform: translateY(-8px) scale(0.98);
+  transform-origin: top right;
+  pointer-events: none;
+  transition: opacity 0.25s ease, transform 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}
+#mv-settings-panel.open {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+  pointer-events: auto;
+}
+.mv-settings-title {
+  color: rgba(255, 255, 255, 0.55);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 6px 8px 10px 8px;
+}
+.mv-setting-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 8px;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: background 0.2s ease;
+}
+.mv-setting-row:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+.mv-setting-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.mv-setting-label {
+  color: #fff;
+  font-size: 13px;
+  font-weight: 700;
+}
+.mv-setting-desc {
+  color: rgba(255, 255, 255, 0.45);
+  font-size: 11px;
+  line-height: 1.3;
+}
+.mv-setting-switch {
+  position: relative;
+  flex: 0 0 auto;
+  width: 42px;
+  height: 24px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.18);
+  transition: background 0.25s ease;
+}
+.mv-setting-switch.on {
+  background: #34c759;
+}
+.mv-setting-switch input {
+  position: absolute;
+  opacity: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  cursor: pointer;
+}
+.mv-setting-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+  transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  pointer-events: none;
+}
+.mv-setting-switch.on .mv-setting-knob {
+  transform: translateX(18px);
+}
+
+/* ===== 歌詞 1行クイックコピー ===== */
+.lyric-quick-copy {
+  position: absolute;
+  left: -40px;
+  top: 50%;
+  transform: translateY(-50%) scale(0.9);
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(255, 255, 255, 0.12);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  color: rgba(255, 255, 255, 0.9);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s ease, transform 0.2s ease, background 0.2s ease;
+  z-index: 6;
+}
+.lyric-line-container:hover .lyric-quick-copy {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(-50%) scale(1);
+}
+.lyric-quick-copy:hover {
+  background: rgba(255, 255, 255, 0.28);
+  color: #fff;
+}
+.lyric-quick-copy.copied {
+  background: #34c759;
+  color: #fff;
+}
+
+/* ===== 外部歌詞：行タップ同期ボタン（クイックコピーの左隣） ===== */
+.lyric-sync-tap {
+  left: -76px;
+}
+.lyric-sync-tap:hover {
+  background: rgba(255, 149, 0, 0.55);
+  color: #fff;
+}
+
+/* ===== 歌詞の可読性スクリム（白/明るい背景対策・常時一定で表示） ===== */
+#mv-lyrics-scrim {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 55%;
+  z-index: 1;
+  pointer-events: none;
+  background: linear-gradient(to top,
+    rgba(0, 0, 0, 0.52) 0%,
+    rgba(0, 0, 0, 0.34) 24%,
+    rgba(0, 0, 0, 0.14) 52%,
+    rgba(0, 0, 0, 0) 100%);
+}
+/* レコードモードは専用の暗い背景があるためスクリム不要 */
+#mv-root-container.record-mode #mv-lyrics-scrim {
+  display: none;
+}
+/* 歌詞テキスト・タイトルはスクリムより前面へ */
+#mv-lyrics-area {
+  z-index: 2;
+}
+#mv-info-area {
+  z-index: 2;
 }

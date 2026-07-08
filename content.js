@@ -2,6 +2,7 @@ document.addEventListener('yt-navigate-finish', onNavigate);
 document.addEventListener('yt-page-data-updated', () => {
   if (rootContainer) {
     setTimeout(() => {
+      if (!rootContainer) return; // 遅延中にMVモードが終了していたら何もしない
       updateMetadataUI();
       updateMVContent(0);
       updateSidebarContent(0);
@@ -21,11 +22,130 @@ let currentLyricsLang = '';
 let idleTimer = null;
 let buttonObserverTimer = null;
 let isInfoPinned = localStorage.getItem('mv_pin_mode') === 'true';
+let isTitleAlwaysOn = localStorage.getItem('mv_always_title') === 'true';
+// 真偽オプションの取得（未設定なら既定値）
+function getMvOption(key, def) {
+  const v = localStorage.getItem(key);
+  if (v === null) return def;
+  return v === 'true';
+}
 let sidebarObserver = null;
 let isInitialized = false;
 let savedVolume = null;
 let lyricPositionIndex = 0;
 let chekiLyricPos = 0;
+// 歌詞ロードの世代トークン。新しいロードが始まったら古い非同期チェーンを無効化し、
+// CCボタン連打などの取得競合（→取得失敗）を防ぐ。
+let mvContentToken = 0;
+// 現在表示中の歌詞がどの動画のものかを記録（遷移後の重複再取得を防ぐ）
+let loadedLyricsVideoId = '';
+// ===== 外部歌詞（LRCLIB）フォールバック =====
+// 字幕がない/自動生成しかない動画で、LRCLIBの同期歌詞（LRC）を代わりに表示する。
+// LRCは原曲基準の時計なので、MVのイントロ・間奏映像パートで生じるズレを
+// 「アンカー列」（lrcTime→videoTimeの対応点の区分ステップ関数）で補正する。
+let externalLyricsInfo = null; // { lines:[{baseTime,text}], trackName, artistName, duration }
+let lyricsAnchors = [];        // [{lrcTime, videoTime}] lrcTime昇順
+let usingExternalLyrics = false;
+// ===== カラオケ風ハイライト =====
+// ASR字幕(json3)の単語ごとの tOffsetMs を「時計」として借り、表示中の正しい歌詞
+// （手動字幕/LRCLIB）の行内を左から塗る。テキストはASRを一切表示しない。
+let asrWordStream = null;      // [{time, text}] 動画時計での単語列
+let karaokeEnabledCache = null;
+// ユーザーが手動スクロール中は自動スクロールを一時停止する（この時刻まで停止）
+let userScrollUntil = 0;
+// play/pause リスナー（付け外しできるようモジュールスコープで固定）
+const playStatus = () => showCenterStatus('play');
+const pauseStatus = () => showCenterStatus('pause');
+// MVモードを起動してよいページか（/watch と /live/ の視聴ページのみ）
+function isWatchPage() {
+  return location.pathname.startsWith('/watch') || location.pathname.startsWith('/live/');
+}
+
+// ===== MAIN世界の字幕キャッシュ（window.__yt_lyrics_cache__）のISOLATED側ミラー =====
+// content.js は ISOLATED 世界で動くため MAIN 世界の変数を直接は読めない。
+// page_script.js が発火する YTI_CaptionData / YTI_CacheResponse 経由でミラーを保持する。
+const ytiLyricsCache = {};
+window.addEventListener('YTI_CaptionData', (e) => {
+  try {
+    const d = JSON.parse(e.detail);
+    if (!d || !d.videoId || !d.text) return;
+    if (!ytiLyricsCache[d.videoId]) ytiLyricsCache[d.videoId] = {};
+    ytiLyricsCache[d.videoId][d.key || '__default__'] = {
+      text: d.text,
+      lang: d.lang || '',
+      tlang: d.tlang || '',
+      name: d.name || '',
+      url: d.url || ''
+    };
+  } catch (_) {}
+});
+
+// MAIN世界に蓄積された永続キャッシュを要求してミラーへ取り込む（リスナー登録前の取りこぼし対策）
+function requestCacheFromPage(videoId) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      window.removeEventListener('YTI_CacheResponse', handler);
+      resolve(ytiLyricsCache[videoId] || null);
+    };
+    const handler = (e) => {
+      try {
+        const d = JSON.parse(e.detail);
+        if (d && d.videoId && d.entries) {
+          if (!ytiLyricsCache[d.videoId]) ytiLyricsCache[d.videoId] = {};
+          for (const k in d.entries) {
+            if (k === '__last') continue;
+            const ent = d.entries[k];
+            if (ent && ent.text) {
+              ytiLyricsCache[d.videoId][k] = {
+                text: ent.text,
+                lang: ent.lang || '',
+                tlang: ent.tlang || '',
+                name: ent.name || '',
+                url: ent.url || ''
+              };
+            }
+          }
+        }
+      } catch (_) {}
+      finish();
+    };
+    window.addEventListener('YTI_CacheResponse', handler);
+    window.dispatchEvent(new CustomEvent('YTI_RequestCache', { detail: videoId }));
+    setTimeout(finish, 300);
+  });
+}
+
+// ミラーキャッシュから指定トラックに一致する字幕を取り出し、パース済みセグメントを返す（0秒）
+function getCachedCaptionForTrack(videoId, track) {
+  if (!videoId || !track) return null;
+  const entries = ytiLyricsCache[videoId];
+  if (!entries) return null;
+  const wantLang = track.code || '';
+  let best = null;
+  for (const k in entries) {
+    if (k === '__last' || k === '__default__') continue;
+    const ent = entries[k];
+    if (!ent || !ent.text) continue;
+    const langMatch = ent.lang === wantLang ||
+      (track.vssId && ('.' + ent.lang) === String(track.vssId).replace(/^a\./, '.'));
+    if (!langMatch) continue;
+    if (ent.tlang) continue; // 自動翻訳(tlang付き)は原文トラックとは別物なので除外
+    if (track.name && ent.name && ent.name === track.name) {
+      best = ent;
+      break; // name まで一致したら確定
+    }
+    if (!best) best = ent;
+  }
+  if (!best && entries['__default__'] && entries['__default__'].text) {
+    best = entries['__default__'];
+  }
+  if (!best) return null;
+  const segs = parseCaptionResponse(best.text);
+  return (segs && segs.length > 0) ? segs : null;
+}
 
 function init() {
   if (isInitialized) return;
@@ -41,6 +161,12 @@ function init() {
   } catch (e) {}
 }
 async function onNavigate() {
+  // 視聴ページ以外（ホーム等）へ遷移したらオーバーレイを畳む。
+  // 放置するとホームのプレビュー動画を掴んだり、video復帰先が壊れたりする。
+  if (!isWatchPage()) {
+    if (rootContainer) endMVMode(true);
+    return;
+  }
   if (rootContainer && sessionStorage.getItem('mv_mode_active') === 'true') {
     const lyricsArea = document.getElementById('mv-lyrics-area');
     if (lyricsArea) lyricsArea.innerHTML = '<p style="opacity:0.5; font-size: 24px; padding: 40px;">Loading next track...</p>';
@@ -107,12 +233,35 @@ function addMVButton() {
 }
 async function startMVMode(isAuto = false, isHotSwap = false) {
   if (rootContainer && !isHotSwap) return;
-  const newTargetVideo = document.querySelector('.video-stream.html5-main-video') || document.querySelector('video');
+  // watchページ以外では起動しない（ホームのプレビュー動画などを掴まないように）
+  if (!isWatchPage()) return;
+  // 実プレイヤー（#movie_player）内を最優先で探す。サムネイルのホバープレビュー等も
+  // .html5-main-video を持つことがあり、document全体の先頭一致では誤選択しうる。
+  const newTargetVideo =
+    document.querySelector('#movie_player .video-stream.html5-main-video') ||
+    (rootContainer && rootContainer.querySelector('.video-stream.html5-main-video')) ||
+    document.querySelector('.video-stream.html5-main-video') ||
+    document.querySelector('video');
   if (!newTargetVideo) {
     setTimeout(() => startMVMode(isAuto, isHotSwap), 1000);
     return;
   }
   sessionStorage.setItem('mv_mode_active', 'true');
+  // 遷移でYouTubeがvideo要素を作り直した場合、古い要素のリスナーを外し、
+  // オーバーレイ内に残った古いvideoを取り除く（2重video・同期停止の防止）
+  if (targetVideo && targetVideo !== newTargetVideo) {
+    targetVideo.removeEventListener('timeupdate', syncLyrics);
+    targetVideo.removeEventListener('seeked', syncLyrics);
+    targetVideo.removeEventListener('loadeddata', syncLyrics);
+    targetVideo.removeEventListener('play', playStatus);
+    targetVideo.removeEventListener('pause', pauseStatus);
+    if (rootContainer && rootContainer.contains(targetVideo)) {
+      try {
+        targetVideo.pause();
+        targetVideo.remove();
+      } catch (e) {}
+    }
+  }
   targetVideo = newTargetVideo;
   if (targetVideo && savedVolume === null) {
     savedVolume = targetVideo.volume;
@@ -122,8 +271,13 @@ async function startMVMode(isAuto = false, isHotSwap = false) {
       targetVideo.setAttribute('crossOrigin', 'anonymous');
     }
   } catch (e) {}
-  originalParent = targetVideo.parentNode;
-  originalNextSibling = targetVideo.nextSibling;
+  // videoが既にオーバーレイ内にあるホットスワップ時は復帰先を上書きしない。
+  // 上書きすると originalParent がオーバーレイ自身になり、MVモード終了時に
+  // videoが画面から消えてしまう。
+  if (!rootContainer || !rootContainer.contains(targetVideo)) {
+    originalParent = targetVideo.parentNode;
+    originalNextSibling = targetVideo.nextSibling;
+  }
   if (!rootContainer) {
     rootContainer = document.createElement('div');
     rootContainer.id = 'mv-root-container';
@@ -277,6 +431,7 @@ async function startMVMode(isAuto = false, isHotSwap = false) {
     const overlayContent = document.createElement('div');
     overlayContent.id = 'mv-overlay-content';
     overlayContent.innerHTML = `
+            <div id="mv-lyrics-scrim"></div>
             <div id="mv-center-status">
                 <svg id="mv-icon-play" class="mv-status-svg" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
                 <svg id="mv-icon-pause" class="mv-status-svg" viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
@@ -299,6 +454,7 @@ async function startMVMode(isAuto = false, isHotSwap = false) {
             <button id="mv-glass-btn" class="mv-glass-btn"><svg viewBox="0 0 24 24" style="width:16px;height:16px;margin-right:6px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;"><rect x="3" y="3" width="18" height="18" rx="2" ry="2" opacity="0.4"/><rect x="7" y="7" width="10" height="10" rx="2" ry="2" opacity="0.7"/></svg> Glass</button>
 
             <div class="mv-header-group right">
+                <button id="mv-settings-btn" class="mv-glass-btn" title="表示オプション"><svg viewBox="0 0 24 24" style="width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
                 <button id="mv-record-btn" class="mv-glass-btn"><svg viewBox="0 0 24 24" style="width:17px;height:17px;margin-right:7px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3" fill="currentColor"/></svg> Record</button>
                 <button id="mv-pin-btn" class="mv-glass-btn"><svg viewBox="0 0 24 24" style="width:15px;height:15px;margin-right:6px;fill:currentColor;"><path d="M17 4v7l2 3v2h-6v5l-1 1-1-1v-5H5v-2l2-3V4c0-1.1.9-2 2-2h6c1.1 0 2 .9 2 2z"/></svg> 固定オフ</button>
                 <button id="mv-close-btn" class="mv-glass-btn"><svg viewBox="0 0 24 24" style="width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:2.5;stroke-linecap:round;"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
@@ -370,6 +526,20 @@ async function startMVMode(isAuto = false, isHotSwap = false) {
       e.stopPropagation();
       enableIpodPiP();
     };
+    const settingsBtn = overlayContent.querySelector('#mv-settings-btn');
+    if (settingsBtn) {
+      const panel = buildSettingsPanel();
+      overlayContent.appendChild(panel);
+      settingsBtn.onclick = (e) => {
+        e.stopPropagation();
+        panel.classList.toggle('open');
+      };
+      document.addEventListener('click', (ev) => {
+        if (!panel.classList.contains('open')) return;
+        if (ev.target.closest('#mv-settings-panel') || ev.target.closest('#mv-settings-btn')) return;
+        panel.classList.remove('open');
+      });
+    }
     const glassBtn = overlayContent.querySelector('#mv-glass-btn');
     const glassSlider = overlayContent.querySelector('#mv-glass-slider');
     if (glassSlider) {
@@ -518,9 +688,15 @@ async function startMVMode(isAuto = false, isHotSwap = false) {
   }
   targetVideo.removeEventListener('timeupdate', syncLyrics);
   targetVideo.addEventListener('timeupdate', syncLyrics);
-  const playStatus = () => showCenterStatus('play');
-  const pauseStatus = () => showCenterStatus('pause');
+  // timeupdate は再生中しか発火しない。一時停止中のシーク/初回ロードでも
+  // ハイライト＆スクロールが追従するよう seeked / loadeddata でも同期する。
+  targetVideo.removeEventListener('seeked', syncLyrics);
+  targetVideo.addEventListener('seeked', syncLyrics);
+  targetVideo.removeEventListener('loadeddata', syncLyrics);
+  targetVideo.addEventListener('loadeddata', syncLyrics);
+  targetVideo.removeEventListener('play', playStatus);
   targetVideo.addEventListener('play', playStatus);
+  targetVideo.removeEventListener('pause', pauseStatus);
   targetVideo.addEventListener('pause', pauseStatus);
   if (!isAuto && !isHotSwap) {
     rootContainer.requestFullscreen().catch(() => {});
@@ -532,21 +708,30 @@ async function startMVMode(isAuto = false, isHotSwap = false) {
   startSidebarObserver();
   const lyricsArea = document.getElementById('mv-lyrics-area');
   if (lyricsArea) startSmoothAutoScroll(lyricsArea);
+  // タイトル常時表示オプションが有効なら、起動時から曲名を表示する
+  if (isTitleAlwaysOn) {
+    setTimeout(() => document.getElementById('mv-info-area')?.classList.add('visible'), 150);
+  }
   if (targetVideo.paused) targetVideo.play();
 }
 
 function endMVMode(keepActive = false) {
+  // 進行中の歌詞ロードを打ち切る（終了後もCCボタン等を操作し続けないように）
+  mvContentToken++;
   if (idleTimer) {
     clearTimeout(idleTimer);
     idleTimer = null;
   }
   document.removeEventListener('fullscreenchange', onFullscreenChange);
   if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+  // videoをまだオーバーレイが保持しているときだけ復帰させる。
+  // YouTube側が既に移動済み（ミニプレイヤー等）なら触らない。
+  const videoHeldByOverlay = !!(rootContainer && targetVideo && rootContainer.contains(targetVideo));
   if (rootContainer) {
     rootContainer.remove();
     rootContainer = null;
   }
-  if (targetVideo && originalParent) {
+  if (targetVideo && originalParent && videoHeldByOverlay) {
     try {
       if (originalNextSibling && originalParent.contains(originalNextSibling)) {
         originalParent.insertBefore(targetVideo, originalNextSibling);
@@ -557,11 +742,18 @@ function endMVMode(keepActive = false) {
   }
   if (targetVideo) {
     targetVideo.removeEventListener('timeupdate', syncLyrics);
+    targetVideo.removeEventListener('seeked', syncLyrics);
+    targetVideo.removeEventListener('loadeddata', syncLyrics);
+    targetVideo.removeEventListener('play', playStatus);
+    targetVideo.removeEventListener('pause', pauseStatus);
     if (savedVolume !== null) {
       targetVideo.volume = savedVolume;
       savedVolume = null;
     }
   }
+  stopSmoothAutoScroll();
+  lastActiveEl = null;
+  cachedTargetScroll = null;
   document.removeEventListener('mousemove', onUserAction);
   document.removeEventListener('click', onUserAction);
   if (!keepActive) {
@@ -659,21 +851,31 @@ async function interceptFromCCButton() {
   return new Promise((resolve) => {
     let ccBtn = document.querySelector('.ytp-subtitles-button');
     let wasTurnedOn = false;
+    const currentVid = new URLSearchParams(window.location.search).get('v') || '';
+    // メタ情報付きの YTI_CaptionData を使い、遷移直後に届く
+    // 「前の動画の字幕レスポンス」を誤って採用しないようにする
     const handler = (e) => {
-      const rawText = e.detail;
-      if (rawText) {
-        window.removeEventListener('YTI_Intercepted_Captions', handler);
-        clearTimeout(timeoutId);
-        if (wasTurnedOn && ccBtn) ccBtn.click();
-        resolve(parseCaptionResponse(rawText));
-      }
+      let d = null;
+      try {
+        d = JSON.parse(e.detail);
+      } catch (_) {}
+      if (!d || !d.text) return;
+      if (currentVid && d.videoId && d.videoId !== currentVid) return;
+      // 自動翻訳(tlang付き)は採用しない。前の動画で選んだ言語（例:K-POPの韓国語）が
+      // YouTube側に記憶されていると、日本の曲で「日本語→韓国語」翻訳字幕が
+      // 勝手に読み込まれ、それを歌詞として誤採用してしまうため。
+      if (d.tlang) return;
+      window.removeEventListener('YTI_CaptionData', handler);
+      clearTimeout(timeoutId);
+      if (wasTurnedOn && ccBtn) ccBtn.click();
+      resolve(parseCaptionResponse(d.text));
     };
-    window.addEventListener('YTI_Intercepted_Captions', handler);
+    window.addEventListener('YTI_CaptionData', handler);
     const timeoutId = setTimeout(() => {
-      window.removeEventListener('YTI_Intercepted_Captions', handler);
+      window.removeEventListener('YTI_CaptionData', handler);
       if (wasTurnedOn && ccBtn) ccBtn.click();
       resolve([]);
-    }, 1500);
+    }, 2500);
     if (ccBtn) {
       const isPressed = ccBtn.getAttribute('aria-pressed') === 'true';
       if (!isPressed) {
@@ -684,7 +886,7 @@ async function interceptFromCCButton() {
         setTimeout(() => ccBtn.click(), 50);
       }
     } else {
-      window.removeEventListener('YTI_Intercepted_Captions', handler);
+      window.removeEventListener('YTI_CaptionData', handler);
       clearTimeout(timeoutId);
       resolve([]);
     }
@@ -858,6 +1060,10 @@ const INTERLUDE_THRESHOLD = 12;
 
 function renderLyricsDOM(lyricsArea) {
   if (!lyricsArea) return;
+  // 歌詞を作り直すので、前の曲のスクロール目標・active要素参照をリセットする
+  lastActiveEl = null;
+  cachedTargetScroll = null;
+  lastLyricIndex = -1;
   const lyricsHeader = document.getElementById('mv-lyrics-header');
   const rmScroll = document.getElementById('rm-lyrics-scroll');
   lyricsArea.innerHTML = '';
@@ -931,6 +1137,39 @@ function renderLyricsDOM(lyricsArea) {
       });
     }
     line.el = container;
+    // #1 クイックコピー：行ホバーで現れるボタンでその行の歌詞を即コピー（再生位置は動かさない）
+    if (!line.isInstrumental) {
+      const quickCopyBtn = document.createElement('button');
+      quickCopyBtn.className = 'lyric-quick-copy';
+      quickCopyBtn.title = 'この行をコピー';
+      quickCopyBtn.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
+      quickCopyBtn.onclick = (e) => {
+        e.stopPropagation();
+        let txt = (line.text || '');
+        if (line.subText) txt += '\n' + line.subText;
+        txt = txt.trim();
+        if (!txt) return;
+        navigator.clipboard.writeText(txt).then(() => {
+          showToast('この行をコピーしました');
+          quickCopyBtn.classList.add('copied');
+          setTimeout(() => quickCopyBtn.classList.remove('copied'), 900);
+        }).catch(() => {});
+      };
+      container.appendChild(quickCopyBtn);
+      // 外部歌詞モード：行ホバーの時計ボタンで「この行＝今」のアンカーを打つ。
+      // イントロや間奏の映像パートで生じたズレを、その行以降だけ合わせ直せる。
+      if (usingExternalLyrics && typeof line.baseTime === 'number') {
+        const syncBtn = document.createElement('button');
+        syncBtn.className = 'lyric-quick-copy lyric-sync-tap';
+        syncBtn.title = 'この行を「今」に同期（この行以降のタイミングを合わせ直します）';
+        syncBtn.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="13" r="8"/><path d="M12 10v3l2 2"/><path d="M9 2h6"/></svg>';
+        syncBtn.onclick = (e) => {
+          e.stopPropagation();
+          addLyricsAnchorForLine(line);
+        };
+        container.appendChild(syncBtn);
+      }
+    }
     container.onclick = (e) => {
       if (isLyricSelectionMode) {
         e.stopPropagation();
@@ -1231,7 +1470,9 @@ function getCaptionTracklistFromPlayer() {
       } catch (_) {}
       resolve({
         list: data.list || [],
-        active: data.active || null
+        active: data.active || null,
+        defaultLang: data.defaultLang || '',
+        videoId: data.videoId || ''
       });
     };
     window.addEventListener(eventId, handler, {
@@ -1240,14 +1481,775 @@ function getCaptionTracklistFromPlayer() {
     (document.head || document.documentElement).appendChild(script);
     setTimeout(() => resolve({
       list: [],
-      active: null
+      active: null,
+      defaultLang: '',
+      videoId: ''
     }), 3000);
   });
 }
-async function updateMVContent(retryCount = 0) {
+// 「歌詞なし」系メッセージを画面下部に表示し、一定時間後にフェードアウト
+// （マウスオーバー中は表示維持）させる共通処理。
+function showNoLyrics(lyricsArea, msg, opts) {
+  if (!lyricsArea) return;
+  opts = opts || {};
+  let style = '';
+  if (opts.fontSize) style += `font-size:${opts.fontSize};`;
+  if (opts.opacity) style += `opacity:${opts.opacity};`;
+  lyricsArea.innerHTML = `<p class="no-lyrics-msg"${style ? ` style="${style}"` : ''}>${msg}</p>`;
+  lyricsArea.classList.add('no-lyrics');
+  lyricsArea.classList.remove('fade-out');
+  if (lyricsArea._noLyricsTimer) clearTimeout(lyricsArea._noLyricsTimer);
+  lyricsArea._noLyricsTimer = setTimeout(() => {
+    if (lyricsArea.classList.contains('no-lyrics')) lyricsArea.classList.add('fade-out');
+  }, 5000);
+  lyricsArea.onmouseenter = () => {
+    if (lyricsArea._noLyricsTimer) clearTimeout(lyricsArea._noLyricsTimer);
+    lyricsArea.classList.remove('fade-out');
+  };
+  lyricsArea.onmouseleave = () => {
+    if (lyricsArea.classList.contains('no-lyrics')) lyricsArea.classList.add('fade-out');
+  };
+}
+
+// ===== 外部歌詞（LRCLIB）＋アンカー同期エンジン =====
+
+// backgroundのFETCH_URL経由で取得（content scriptはページのCORSに縛られるため）
+function fetchViaBackground(url) {
+  return new Promise((resolve) => {
+    try {
+      chrome.runtime.sendMessage({ type: 'FETCH_URL', url }, (res) => {
+        if (chrome.runtime.lastError || !res || !res.success) resolve(null);
+        else resolve(res.text);
+      });
+    } catch (e) {
+      resolve(null);
+    }
+  });
+}
+
+// 照合用正規化：NFKC→小文字→カタカナをひらがなへ→記号・空白を除去。
+// ASRと歌詞カードで漢字の開き方が違っても、バイグラム照合でそこそこ吸収できる。
+function yti_normalizeForMatch(s) {
+  if (!s) return '';
+  let t = String(s).normalize('NFKC').toLowerCase();
+  t = t.replace(/[ァ-ヶ]/g, ch => String.fromCharCode(ch.charCodeAt(0) - 0x60));
+  t = t.replace(/[^\p{L}\p{N}]/gu, '');
+  return t;
+}
+
+// 文字バイグラムのDice係数（0〜1）。CJKでは編集距離より語順ゆらぎ・誤字に頑健。
+function yti_diceSim(a, b) {
+  if (!a || !b) return 0;
+  if (a === b) return 1;
+  if (a.length < 2 || b.length < 2) return 0;
+  const grams = new Map();
+  for (let i = 0; i < a.length - 1; i++) {
+    const g = a.substr(i, 2);
+    grams.set(g, (grams.get(g) || 0) + 1);
+  }
+  let hits = 0;
+  for (let i = 0; i < b.length - 1; i++) {
+    const g = b.substr(i, 2);
+    const c = grams.get(g) || 0;
+    if (c > 0) {
+      hits++;
+      grams.set(g, c - 1);
+    }
+  }
+  return (2 * hits) / (a.length - 1 + b.length - 1);
+}
+
+// LRC形式をパース。[mm:ss.xx] 複数タイムタグ/1行にも対応。空テキスト行は捨てる。
+function parseLrcText(lrcText) {
+  const lines = [];
+  const tagRe = /\[(\d{1,2}):(\d{1,2})(?:[.:](\d{1,3}))?\]/g;
+  for (const rawLine of String(lrcText || '').split(/\r\n|\n|\r/)) {
+    const times = [];
+    let m;
+    let lastIndex = 0;
+    tagRe.lastIndex = 0;
+    while ((m = tagRe.exec(rawLine)) !== null) {
+      const frac = m[3] ? parseFloat('0.' + m[3]) : 0;
+      times.push(parseInt(m[1], 10) * 60 + parseInt(m[2], 10) + frac);
+      lastIndex = tagRe.lastIndex;
+    }
+    if (times.length === 0) continue;
+    const text = rawLine.slice(lastIndex).trim();
+    if (!text) continue;
+    times.forEach(t => lines.push({ baseTime: t, text }));
+  }
+  lines.sort((a, b) => a.baseTime - b.baseTime);
+  return lines;
+}
+
+// LRCLIBから同期歌詞を検索。タイトル・アーティスト類似度＋動画尺との整合でスコアリング。
+// 結果はvideoIdごとにlocalStorageへキャッシュ（ヒット30日・ミス24時間）し、再取得を避ける。
+async function fetchLrclibLyrics(videoId) {
+  const cacheKey = 'yti_lrc_cache_' + (videoId || '');
+  try {
+    const raw = localStorage.getItem(cacheKey);
+    if (raw) {
+      const c = JSON.parse(raw);
+      const age = Date.now() - (c.ts || 0);
+      if (c.miss && age < 24 * 3600 * 1000) return null;
+      if (!c.miss && Array.isArray(c.lines) && c.lines.length && age < 30 * 24 * 3600 * 1000) {
+        return { lines: c.lines, trackName: c.trackName || '', artistName: c.artistName || '', duration: c.duration || 0 };
+      }
+    }
+  } catch (e) {}
+  const saveCache = (obj) => {
+    try {
+      localStorage.setItem(cacheKey, JSON.stringify(Object.assign({ ts: Date.now() }, obj)));
+    } catch (e) {}
+  };
+  const meta = getCleanedMetadata();
+  if (!meta.title) return null;
+  const videoDur = (targetVideo && isFinite(targetVideo.duration)) ? targetVideo.duration : 0;
+  const queries = [];
+  if (meta.artist) {
+    queries.push(`https://lrclib.net/api/search?track_name=${encodeURIComponent(meta.title)}&artist_name=${encodeURIComponent(meta.artist)}`);
+    queries.push(`https://lrclib.net/api/search?q=${encodeURIComponent(meta.artist + ' ' + meta.title)}`);
+  }
+  queries.push(`https://lrclib.net/api/search?q=${encodeURIComponent(meta.title)}`);
+  const normTitle = yti_normalizeForMatch(meta.title);
+  const normArtist = yti_normalizeForMatch(meta.artist);
+  for (const url of queries) {
+    const text = await fetchViaBackground(url);
+    if (!text) continue;
+    let list = [];
+    try {
+      list = JSON.parse(text);
+    } catch (e) {
+      continue;
+    }
+    if (!Array.isArray(list)) continue;
+    let best = null;
+    let bestScore = 0;
+    for (const item of list) {
+      if (!item || !item.syncedLyrics) continue;
+      let score = yti_diceSim(normTitle, yti_normalizeForMatch(item.trackName || ''));
+      if (normArtist) {
+        score = score * 0.7 + yti_diceSim(normArtist, yti_normalizeForMatch(item.artistName || '')) * 0.3;
+      }
+      if (videoDur > 30 && item.duration) {
+        // 原曲がMVより長いことは通常ない（MVは映像パディングで曲より長い）
+        if (item.duration > videoDur + 5) score -= 0.3;
+        else score += Math.max(0, 0.15 - (Math.abs(videoDur - item.duration) / videoDur) * 0.3);
+      }
+      if (score > bestScore) {
+        bestScore = score;
+        best = item;
+      }
+    }
+    if (best && bestScore >= 0.45) {
+      const lines = parseLrcText(best.syncedLyrics);
+      if (lines.length >= 4) {
+        const result = {
+          lines,
+          trackName: best.trackName || meta.title,
+          artistName: best.artistName || meta.artist,
+          duration: best.duration || 0
+        };
+        saveCache(result);
+        return result;
+      }
+    }
+  }
+  saveCache({ miss: true });
+  return null;
+}
+
+// ===== アンカー列（区分ステップ関数）=====
+// ズレは「イントロ/間奏の映像パート挿入」による階段状の定数なので、
+// アンカーより後ろの行にそのアンカーのオフセットを適用すれば全編合う。
+function yti_anchorStorageKey(videoId) {
+  return 'yti_lrc_anchors_' + (videoId || '');
+}
+
+function loadLyricsAnchors(videoId) {
+  try {
+    const raw = localStorage.getItem(yti_anchorStorageKey(videoId));
+    if (!raw) return [];
+    const arr = JSON.parse(raw);
+    if (Array.isArray(arr)) {
+      return arr.filter(a => a && typeof a.lrcTime === 'number' && typeof a.videoTime === 'number')
+        .sort((a, b) => a.lrcTime - b.lrcTime);
+    }
+  } catch (e) {}
+  return [];
+}
+
+function saveLyricsAnchors() {
+  const vid = loadedLyricsVideoId || getVideoId();
+  try {
+    if (lyricsAnchors.length) localStorage.setItem(yti_anchorStorageKey(vid), JSON.stringify(lyricsAnchors));
+    else localStorage.removeItem(yti_anchorStorageKey(vid));
+  } catch (e) {}
+}
+
+// アンカーを適用して lyricsData を再構築＋再描画。アンカー変更時にも呼ぶ。
+function applyExternalLyricsData() {
+  if (!externalLyricsInfo) return;
+  const anchors = lyricsAnchors;
+  const offsetAt = (t) => {
+    if (!anchors.length) return 0;
+    // 最初のアンカーより前の行にも先頭オフセット（=イントロ分）を適用する
+    let off = anchors[0].videoTime - anchors[0].lrcTime;
+    for (const a of anchors) {
+      if (a.lrcTime <= t + 0.001) off = a.videoTime - a.lrcTime;
+      else break;
+    }
+    return off;
+  };
+  const shifted = externalLyricsInfo.lines.map(l => ({
+    time: Math.max(0, l.baseTime + offsetAt(l.baseTime)),
+    baseTime: l.baseTime,
+    text: l.text,
+    el: null
+  }));
+  // アンカーの打ち間違いで時刻が逆行しても行順・ハイライトが壊れないよう単調化
+  for (let i = 1; i < shifted.length; i++) {
+    if (shifted[i].time < shifted[i - 1].time) shifted[i].time = shifted[i - 1].time + 0.01;
+  }
+  lyricsData = processRawLyricsToProcessed(shifted);
+  const lyricsArea = document.getElementById('mv-lyrics-area');
+  const rootContainer = document.getElementById('mv-root-container');
+  if (rootContainer) rootContainer.classList.remove('no-lyrics-mode');
+  if (lyricsArea) {
+    lyricsArea.classList.remove('no-lyrics', 'fade-out');
+    renderLyricsDOM(lyricsArea);
+  }
+  // アンカーで行時刻が変わったので、カラオケ用の単語タイミングも付け直す
+  if (asrWordStream) attachKaraokeTiming(asrWordStream);
+  try {
+    syncLyrics();
+  } catch (e) {}
+}
+
+// 「この行を今に合わせる」：この行以降のアンカーを張り替える（前半の同期は保持）
+function addLyricsAnchorForLine(line) {
+  if (!targetVideo || typeof line.baseTime !== 'number') return;
+  lyricsAnchors = lyricsAnchors.filter(a => a.lrcTime < line.baseTime - 0.001);
+  lyricsAnchors.push({ lrcTime: line.baseTime, videoTime: targetVideo.currentTime });
+  lyricsAnchors.sort((a, b) => a.lrcTime - b.lrcTime);
+  saveLyricsAnchors();
+  applyExternalLyricsData();
+  showToast('この行を現在の再生位置に同期しました');
+}
+
+// 全体を±deltaへ微調整（アンカーが無ければ先頭アンカーを新設）
+function nudgeLyricsOffset(delta) {
+  if (!lyricsAnchors.length) lyricsAnchors = [{ lrcTime: 0, videoTime: delta }];
+  else lyricsAnchors = lyricsAnchors.map(a => ({ lrcTime: a.lrcTime, videoTime: a.videoTime + delta }));
+  saveLyricsAnchors();
+  applyExternalLyricsData();
+  const off = lyricsAnchors[0].videoTime - lyricsAnchors[0].lrcTime;
+  showToast(`オフセット: ${off >= 0 ? '+' : ''}${off.toFixed(1)}秒`);
+}
+
+// ===== ASRハイブリッド自動整合 =====
+// ASR字幕は誤字だらけだがタイミングは実音声由来で正確。テキストはLRCLIB、
+// 時計はASRから借りる：行同士をあいまい照合し、オフセットの階段を推定する。
+function autoAlignWithAsr(lrcLines, asrSegs) {
+  if (!lrcLines || lrcLines.length < 4 || !asrSegs || asrSegs.length < 4) return null;
+  const asr = asrSegs
+    .map(s => ({ time: s.time, norm: yti_normalizeForMatch(s.text) }))
+    .filter(s => s.norm.length >= 2);
+  if (asr.length < 4) return null;
+  const cands = [];
+  for (const line of lrcLines) {
+    const norm = yti_normalizeForMatch(line.text);
+    if (norm.length < 5) continue;
+    let bestSim = 0;
+    let bestTime = 0;
+    for (let i = 0; i < asr.length; i++) {
+      // ASRは行の切れ目がLRCとズレるため、隣接2セグメント連結も試す
+      let sim = yti_diceSim(norm, asr[i].norm);
+      if (i + 1 < asr.length) {
+        const sim2 = yti_diceSim(norm, asr[i].norm + asr[i + 1].norm);
+        if (sim2 > sim) sim = sim2;
+      }
+      if (sim > bestSim) {
+        bestSim = sim;
+        bestTime = asr[i].time;
+      }
+    }
+    if (bestSim >= 0.55) {
+      cands.push({ lrcTime: line.baseTime, videoTime: bestTime, delta: bestTime - line.baseTime });
+    }
+  }
+  if (cands.length < 3) return null;
+  cands.sort((a, b) => a.lrcTime - b.lrcTime);
+  // オフセットの連続性（±2秒）で区間分け。単発の飛び値は捨てる。
+  const groups = [];
+  let cur = [cands[0]];
+  for (let i = 1; i < cands.length; i++) {
+    if (Math.abs(cands[i].delta - cur[cur.length - 1].delta) <= 2.0) cur.push(cands[i]);
+    else {
+      groups.push(cur);
+      cur = [cands[i]];
+    }
+  }
+  groups.push(cur);
+  const solid = groups.filter(g => g.length >= 2);
+  if (!solid.length) return null;
+  // マッチの大半が安定区間に属していなければ照合自体を信用しない
+  const covered = solid.reduce((n, g) => n + g.length, 0);
+  if (covered < cands.length * 0.6) return null;
+  const median = (arr) => {
+    const s = [...arr].sort((x, y) => x - y);
+    return s[Math.floor(s.length / 2)];
+  };
+  const anchors = [];
+  for (const g of solid) {
+    const off = median(g.map(c => c.delta));
+    // 直前の区間とオフセットがほぼ同じなら統合（間に飛び値があっただけ）
+    if (anchors.length) {
+      const prevOff = anchors[anchors.length - 1].videoTime - anchors[anchors.length - 1].lrcTime;
+      if (Math.abs(prevOff - off) < 1.0) continue;
+    }
+    anchors.push({ lrcTime: g[0].lrcTime, videoTime: g[0].lrcTime + off });
+  }
+  return anchors.length ? anchors : null;
+}
+
+// ===== カラオケ風ハイライト =====
+
+// 字幕トラックのjson3を生テキストで取得（単語オフセットを保持するため未パースで返す）
+async function fetchCaptionTrackRaw(baseUrl) {
+  try {
+    const safeUrl = baseUrl.replace(/&tlang=[^&]*/g, '');
+    const urlJson = safeUrl.includes('fmt=')
+      ? safeUrl.replace(/fmt=[^&]*/, 'fmt=json3')
+      : (safeUrl.includes('?') ? safeUrl + '&fmt=json3' : safeUrl + '?fmt=json3');
+    const res = await fetch(urlJson);
+    if (res.ok) {
+      const text = await res.text();
+      if (text && text.trim()) return text;
+    }
+  } catch (e) {}
+  return null;
+}
+
+// json3のイベントから単語列を抽出（ASRはsegsに単語ごとの tOffsetMs を持つ）
+function parseJson3Words(text) {
+  const words = [];
+  try {
+    const json = JSON.parse(text);
+    if (!json.events || !Array.isArray(json.events)) return null;
+    let multiSegEvents = 0;
+    let totalEvents = 0;
+    for (const ev of json.events) {
+      if (!ev.segs || !ev.segs.length) continue;
+      const base = ev.tStartMs || 0;
+      const segWords = ev.segs.filter(s => (s.utf8 || '').trim());
+      if (!segWords.length) continue;
+      totalEvents++;
+      if (segWords.length > 1) multiSegEvents++;
+      for (const s of segWords) {
+        words.push({ time: (base + (s.tOffsetMs || 0)) / 1000, text: s.utf8.trim() });
+      }
+    }
+    if (totalEvents === 0 || multiSegEvents < totalEvents * 0.3) return null;
+  } catch (e) {
+    return null;
+  }
+  return words;
+}
+
+// srv3(XML)の <p t=".."><s t="offset">語</s>... からも単語列を抽出できるようにする。
+// プレイヤーが横取りキャッシュに残す形式がjson3とは限らないため両対応。
+function parseSrv3Words(xmlText) {
+  const decode = (s) => s.replace(/<[^>]+>/g, '')
+    .replace(/&#39;/g, "'").replace(/&quot;/g, '"')
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+  const attrNum = (attrs, name) => {
+    const m = attrs.match(new RegExp('\\b' + name + '="(\\d+)"'));
+    return m ? parseInt(m[1], 10) : 0;
+  };
+  const words = [];
+  let totalP = 0;
+  let multiP = 0;
+  const pRe = /<p\b([^>]*)>([\s\S]*?)<\/p>/g;
+  let pm;
+  while ((pm = pRe.exec(xmlText)) !== null) {
+    const base = attrNum(pm[1], 't');
+    const sRe = /<s\b([^>]*)>([\s\S]*?)<\/s>/g;
+    let sm;
+    const segs = [];
+    while ((sm = sRe.exec(pm[2])) !== null) {
+      const w = decode(sm[2]).trim();
+      if (w) segs.push({ time: (base + attrNum(sm[1], 't')) / 1000, text: w });
+    }
+    if (!segs.length) continue;
+    totalP++;
+    if (segs.length > 1) multiP++;
+    words.push(...segs);
+  }
+  if (totalP === 0 || multiP < totalP * 0.3) return null;
+  return words;
+}
+
+// 字幕レスポンスから単語列を抽出。単語オフセットを持たない字幕（手動字幕の多く）
+// では null（単語時計として使えない）。この判定はASRレスポンスの識別にも使う。
+function parseCaptionWords(text) {
+  if (!text) return null;
+  const trimmed = String(text).trim();
+  let words = trimmed.charAt(0) === '{' ? parseJson3Words(trimmed) : parseSrv3Words(trimmed);
+  if (!words || words.length < 8) return null;
+  words.sort((a, b) => a.time - b.time);
+  // 重複（同時刻・同語）除去
+  const out = [];
+  for (const w of words) {
+    const p = out[out.length - 1];
+    if (p && Math.abs(p.time - w.time) < 0.01 && p.text === w.text) continue;
+    out.push(w);
+  }
+  return out;
+}
+
+// プレイヤーにASRトラックを一瞬ロードさせ、その字幕通信を横取りして生テキストを得る。
+// 直接fetchが空ボディを返す環境（potトークン必須化以降）での本命ルート。
+// CCの状態は元に戻す：OFFだったならOFFへ、ONだったなら元のトラックへ。
+function forceInterceptAsrRaw(videoId, asrTrack, restoreCode) {
+  return new Promise((resolve) => {
+    let timeoutId;
+    const ccBtnEl = document.querySelector('.ytp-subtitles-button');
+    const ccWasOn = !!(ccBtnEl && ccBtnEl.getAttribute('aria-pressed') === 'true');
+    const finish = (result) => {
+      window.removeEventListener('YTI_CaptionData', handler);
+      clearTimeout(timeoutId);
+      try {
+        if (!ccWasOn && ccBtnEl && ccBtnEl.getAttribute('aria-pressed') === 'true') {
+          ccBtnEl.click();
+        } else if (ccWasOn && restoreCode) {
+          // 視聴者がCCで字幕を見ていた場合、ASRのまま放置せず元の言語へ戻す
+          window.dispatchEvent(new CustomEvent('YTI_ForceChangeTrack', { detail: restoreCode }));
+        }
+      } catch (e) {}
+      resolve(result);
+    };
+    const handler = (e) => {
+      let d = null;
+      try {
+        d = JSON.parse(e.detail);
+      } catch (_) {}
+      if (!d || !d.text) return;
+      if (videoId && d.videoId && d.videoId !== videoId) return;
+      if (d.tlang) return;
+      // 単語オフセットを持つレスポンス＝ASR。手動字幕の混入はここで弾かれる
+      if (!parseCaptionWords(d.text)) return;
+      finish(d.text);
+    };
+    window.addEventListener('YTI_CaptionData', handler);
+    // page_script側の tracklist ロード待ちリトライ（最大2秒）を見込んだ余裕を持つ
+    timeoutId = setTimeout(() => finish(null), 6000);
+    window.dispatchEvent(new CustomEvent('YTI_ForceChangeTrack', {
+      detail: JSON.stringify({
+        languageCode: asrTrack.code,
+        kind: 'asr',
+        vssId: asrTrack.vssId || ('a.' + (asrTrack.code || ''))
+      })
+    }));
+  });
+}
+
+// 成功済みの字幕通信URL（ドナー）から pot 等のセッションパラメータを移植する。
+// baseUrlの署名パラメータはそのまま、不足分だけを補う。
+function yti_graftSessionParams(baseUrl, donorUrl) {
+  try {
+    const dst = new URL(baseUrl, location.href);
+    const src = new URL(donorUrl, location.href);
+    ['pot', 'potc', 'c', 'cver', 'cplayer', 'cbr', 'cbrver', 'cos', 'cosver', 'cplatform'].forEach(p => {
+      const v = src.searchParams.get(p);
+      if (v !== null && !dst.searchParams.has(p)) dst.searchParams.set(p, v);
+    });
+    return dst.toString();
+  } catch (e) {
+    return null;
+  }
+}
+
+// ASRの生字幕テキストを堅牢に取得する（4段フォールバック）。
+// 1) パッシブ横取りキャッシュ  2) 直接fetch  3) pot移植fetch  4) 強制ロード＋横取り
+async function getAsrRawText(videoId, asrTrack, allowIntercept, restoreCode) {
+  const dbg = (msg) => {
+    try {
+      console.info('[YT Immersion] ASR取得: ' + msg);
+    } catch (e) {}
+  };
+  // 1) プレイヤー自身が取得した字幕のコピーがMAIN世界キャッシュにあれば最優先
+  let donorUrl = '';
+  try {
+    await requestCacheFromPage(videoId);
+    const entries = ytiLyricsCache[videoId];
+    if (entries) {
+      for (const k of Object.keys(entries)) {
+        if (k === '__last') continue;
+        const ent = entries[k];
+        if (!ent || !ent.text || ent.tlang) continue;
+        if (ent.url && ent.url.indexOf('pot=') >= 0) donorUrl = ent.url;
+        if (parseCaptionWords(ent.text)) {
+          dbg('横取りキャッシュにヒット');
+          return ent.text;
+        }
+      }
+    }
+  } catch (e) {}
+  dbg('キャッシュに単語付きレスポンスなし');
+  // 2) 直接fetch（近年は空ボディが多いが、生きている環境もあるので残す）
+  if (asrTrack && asrTrack.baseUrl) {
+    const raw = await fetchCaptionTrackRaw(asrTrack.baseUrl);
+    if (raw && parseCaptionWords(raw)) {
+      dbg('直接fetchで取得');
+      return raw;
+    }
+    dbg('直接fetchは失敗（空ボディ等）');
+    // 3) プレイヤーが成功させた通信からpot等を移植して再fetch
+    if (donorUrl) {
+      const grafted = yti_graftSessionParams(asrTrack.baseUrl, donorUrl);
+      if (grafted) {
+        const raw3 = await fetchCaptionTrackRaw(grafted);
+        if (raw3 && parseCaptionWords(raw3)) {
+          dbg('potパラメータ移植fetchで取得');
+          return raw3;
+        }
+      }
+      dbg('pot移植fetchも失敗');
+    } else {
+      dbg('potドナーURLなし（プレイヤーがまだ字幕通信をしていない）');
+    }
+  }
+  // 4) 強制ロード＋横取り（CC状態は復元される）
+  if (allowIntercept && asrTrack) {
+    dbg('ASRトラックの強制ロード＋横取りを試行...');
+    const raw = await forceInterceptAsrRaw(videoId, asrTrack, restoreCode);
+    if (raw) {
+      dbg('強制ロード横取りで取得');
+      return raw;
+    }
+    dbg('強制ロード横取りも失敗');
+  }
+  return null;
+}
+
+// 各歌詞行に「時刻→行内位置(0..1)」の折れ線 line.karaoke を付与する。
+// 行の時間窓に入るASR単語を集め、正規化文字長の累積比で行内位置を推定する。
+// 表記（漢字/かな）が違っても、同じ音声を写しているので比率はほぼ一致する。
+function attachKaraokeTiming(words) {
+  if (!words || words.length < 8 || !lyricsData || !lyricsData.length) return;
+  for (let i = 0; i < lyricsData.length; i++) {
+    const line = lyricsData[i];
+    if (line.isInstrumental) continue;
+    const start = line.time;
+    const next = lyricsData[i + 1];
+    const end = Math.min(next ? next.time : start + 6, start + 15);
+    if (end - start < 0.8) continue;
+    const inWin = words.filter(w => w.time >= start - 0.4 && w.time < end - 0.05);
+    if (inWin.length < 2) {
+      line.karaoke = null;
+      continue;
+    }
+    const lens = inWin.map(w => Math.max(1, yti_normalizeForMatch(w.text).length));
+    const total = lens.reduce((a, b) => a + b, 0);
+    const pts = [[Math.max(start, inWin[0].time), 0]];
+    let acc = 0;
+    for (let k = 1; k < inWin.length; k++) {
+      acc += lens[k - 1];
+      pts.push([inWin[k].time, acc / total]);
+    }
+    const avgGap = (inWin[inWin.length - 1].time - inWin[0].time) / Math.max(1, inWin.length - 1);
+    pts.push([Math.min(end, inWin[inWin.length - 1].time + Math.max(0.4, avgGap)), 1]);
+    line.karaoke = pts;
+  }
+}
+
+// 毎フレーム呼ばれる塗り更新。ASR単語タイミングがあれば折れ線補間で、
+// 無い行は行の表示時間で線形に0→1へ（近似カラオケ）。
+function updateKaraokeFill() {
+  const root = document.getElementById('mv-root-container');
+  if (!root) return;
+  if (karaokeEnabledCache === null) karaokeEnabledCache = getMvOption('mv_karaoke', false);
+  if (!karaokeEnabledCache) {
+    if (root.classList.contains('karaoke-on')) root.classList.remove('karaoke-on');
+    return;
+  }
+  if (!root.classList.contains('karaoke-on')) root.classList.add('karaoke-on');
+  if (!targetVideo || !lyricsData || !lyricsData.length) return;
+  const t = targetVideo.currentTime;
+  let idx = -1;
+  for (let i = 0; i < lyricsData.length; i++) {
+    if (lyricsData[i].time <= t) idx = i;
+    else break;
+  }
+  if (idx < 0) return;
+  const line = lyricsData[idx];
+  if (!line || line.isInstrumental) return;
+  let frac = 0;
+  const pts = line.karaoke;
+  if (pts && pts.length >= 2) {
+    if (t <= pts[0][0]) frac = 0;
+    else if (t >= pts[pts.length - 1][0]) frac = 1;
+    else {
+      for (let k = 1; k < pts.length; k++) {
+        if (t < pts[k][0]) {
+          const [t0, f0] = pts[k - 1];
+          const [t1, f1] = pts[k];
+          frac = f0 + (f1 - f0) * ((t - t0) / Math.max(0.001, t1 - t0));
+          break;
+        }
+      }
+    }
+  } else {
+    // 線形近似：行開始→終了（次行 or 想定尺）。持ち歌詞に時計が無くてもそれっぽく塗る
+    const next = lyricsData[idx + 1];
+    let end = next ? next.time : line.time + 5;
+    if (line.duration) end = Math.min(end, line.time + line.duration);
+    end = Math.min(end, line.time + 12);
+    frac = (t - line.time) / Math.max(0.5, end - line.time);
+  }
+  frac = Math.max(0, Math.min(1, frac));
+  const val = frac.toFixed(4);
+  if (line.el && line.el._ytiFill !== val) {
+    line.el.style.setProperty('--yti-fill', val);
+    line.el._ytiFill = val;
+  }
+  if (line.rmEl && line.rmEl._ytiFill !== val) {
+    line.rmEl.style.setProperty('--yti-fill', val);
+    line.rmEl._ytiFill = val;
+  }
+}
+
+// ASR単語タイミングを非同期取得して現在の歌詞に付与（表示をブロックしない）
+async function loadAsrWordsAndAttach(asrTrack, videoId, token, restoreCode) {
+  asrWordStream = null;
+  if (!asrTrack) {
+    try {
+      console.info('[YT Immersion] この動画にASRトラックなし。行単位の線形近似で塗ります');
+    } catch (e) {}
+    return;
+  }
+  // カラオケOFF（既定）のときは取得自体を行わない（無駄な通信・CC操作をしない）
+  if (!getMvOption('mv_karaoke', false)) return;
+  const allowIntercept = true;
+  try {
+    const raw = await getAsrRawText(videoId, asrTrack, allowIntercept, restoreCode);
+    if (token !== mvContentToken) return;
+    if ((new URLSearchParams(window.location.search).get('v')) !== videoId) return;
+    const words = raw ? parseCaptionWords(raw) : null;
+    if (words && words.length >= 8) {
+      asrWordStream = words;
+      attachKaraokeTiming(asrWordStream);
+      try {
+        console.info('[YT Immersion] カラオケ単語同期ON: ' + words.length + ' words');
+      } catch (e) {}
+      showToast('カラオケ: 単語タイミングに同期しました');
+    } else {
+      try {
+        console.info('[YT Immersion] ASR単語タイミング取得不可。行単位の線形近似で塗ります');
+      } catch (e) {}
+    }
+  } catch (e) {}
+}
+
+// 外部歌詞モードのヘッダー（出典バッジ・±0.5秒・同期リセット）
+function buildExternalLyricsHeader(lyricsHeader) {
+  if (!lyricsHeader) lyricsHeader = document.getElementById('mv-lyrics-header');
+  if (!lyricsHeader || !externalLyricsInfo) return;
+  lyricsHeader.innerHTML = '';
+  const badge = document.createElement('span');
+  badge.className = 'mv-lyric-action-btn';
+  badge.style.cssText = 'cursor:default;opacity:0.8;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+  badge.textContent = `♪ ${externalLyricsInfo.trackName} — ${externalLyricsInfo.artistName}`;
+  badge.title = 'LRCLIBから取得した外部歌詞です。ズレている場合は、今歌われている行の時計ボタンで同期できます';
+  lyricsHeader.appendChild(badge);
+  const mkBtn = (label, title, fn) => {
+    const b = document.createElement('button');
+    b.className = 'mv-lyric-action-btn';
+    b.textContent = label;
+    b.title = title;
+    b.onclick = (e) => {
+      e.stopPropagation();
+      fn();
+    };
+    lyricsHeader.appendChild(b);
+    return b;
+  };
+  mkBtn('−0.5s', '歌詞全体を0.5秒早める', () => nudgeLyricsOffset(-0.5));
+  mkBtn('+0.5s', '歌詞全体を0.5秒遅らせる', () => nudgeLyricsOffset(0.5));
+  mkBtn('同期リセット', 'この動画の同期補正をすべて消去', () => {
+    lyricsAnchors = [];
+    saveLyricsAnchors();
+    applyExternalLyricsData();
+    showToast('同期をリセットしました');
+  });
+}
+
+// 字幕が取れなかったときの外部歌詞フォールバック本体。
+// 成功時は表示まで済ませて true を返す。呼び出し元は直後に世代チェックすること。
+async function tryExternalLyricsFallback(videoId, lyricsArea, lyricsHeader, token, asrTrack) {
+  if (!getMvOption('mv_external_lyrics', false)) return false;
+  if (lyricsArea) {
+    lyricsArea.classList.remove('no-lyrics', 'fade-out');
+    lyricsArea.innerHTML = '<p style="color:rgba(255,255,255,0.3); font-size:20px; padding:20px;">外部データベースで歌詞を検索中...</p>';
+  }
+  const result = await fetchLrclibLyrics(videoId);
+  if (token !== mvContentToken) return false;
+  if (!result) return false;
+  externalLyricsInfo = result;
+  usingExternalLyrics = true;
+  lyricsAnchors = loadLyricsAnchors(videoId);
+  let autoAligned = false;
+  // ASRの生レスポンスを1回だけ堅牢取得（キャッシュ→fetch→強制ロード横取り）し、
+  // 行時計（自動整合）と単語時計（カラオケ塗り）の両方に使う
+  if (asrTrack) {
+    const asrRaw = await getAsrRawText(videoId, asrTrack, true);
+    if (token !== mvContentToken) return false;
+    if (asrRaw) {
+      const words = parseCaptionWords(asrRaw);
+      if (words && words.length >= 8) asrWordStream = words;
+      // 保存済みの手動同期があればそれを優先。無ければASRの時計で自動整合を試みる。
+      if (lyricsAnchors.length === 0) {
+        const asrSegs = parseCaptionResponse(asrRaw);
+        if (asrSegs && asrSegs.length) {
+          const autoAnchors = autoAlignWithAsr(result.lines, asrSegs);
+          if (autoAnchors && autoAnchors.length) {
+            lyricsAnchors = autoAnchors;
+            autoAligned = true;
+          }
+        }
+      }
+    }
+  }
+  loadedLyricsVideoId = videoId || '';
+  currentLyricsLang = '';
+  applyExternalLyricsData();
+  buildExternalLyricsHeader(lyricsHeader);
+  if (autoAligned) showToast('外部歌詞を自動生成字幕と自動同期しました');
+  else if (lyricsAnchors.length) showToast('外部歌詞を表示中（保存済みの同期補正を適用）');
+  else showToast('外部歌詞を表示中。ズレる場合は行の時計ボタンで同期できます');
+  return true;
+}
+
+async function updateMVContent(retryCount = 0, token = null) {
+  // 世代トークン：新しいロードが始まったら、進行中の古いチェーン（リトライ含む）は
+  // ここで打ち切る。複数チェーンが同時にCCボタンを操作して両方失敗する競合を防ぐ。
+  if (token === null) token = ++mvContentToken;
+  if (token !== mvContentToken) return;
   const infoArea = document.getElementById('mv-info-area');
   const lyricsArea = document.getElementById('mv-lyrics-area');
   const lyricsHeader = document.getElementById('mv-lyrics-header');
+  const videoId = new URLSearchParams(window.location.search).get('v');
+  // この動画の歌詞が既に表示済みなら再取得しない
+  // （yt-page-data-updated の遅延発火による無駄な取り直し＆表示消失を防ぐ）
+  if (retryCount === 0 && videoId && videoId === loadedLyricsVideoId &&
+      lyricsData.length > 0 && lyricsArea && lyricsArea.querySelector('.lyric-line-container')) {
+    updateMetadataUI();
+    try {
+      updateSidebarContent(0);
+    } catch (e) {}
+    return;
+  }
   if (lyricsArea) {
     lyricsArea.classList.remove('no-lyrics', 'fade-out', 'selecting');
     lyricsArea.onmouseenter = null;
@@ -1261,27 +2263,33 @@ async function updateMVContent(retryCount = 0) {
     lyricsData = [];
     lyricsByLanguage = {};
     currentLyricsLang = '';
+    usingExternalLyrics = false;
+    externalLyricsInfo = null;
+    lyricsAnchors = [];
+    asrWordStream = null;
     if (rootContainer) rootContainer.classList.remove('no-lyrics-mode');
   }
   const tracklistData = await getCaptionTracklistFromPlayer();
+  if (token !== mvContentToken) return;
   const tracks = tracklistData.list || [];
-  if (!tracks || tracks.length === 0) {
-    if (retryCount < 5) {
-      setTimeout(() => updateMVContent(retryCount + 1), 1000);
+  const defaultLang = tracklistData.defaultLang || '';
+  const excludeAuto = getMvOption('mv_exclude_auto', true);
+  const autoPriority = getMvOption('mv_lang_auto_priority', true);
+  // プレイヤーがまだ前の動画の情報を返している間（SPA遷移直後）は待って再試行。
+  // 前の動画のトラックURLで取得すると失敗や別の曲の歌詞表示につながる。
+  const isStaleResponse = !!(tracklistData.videoId && videoId && tracklistData.videoId !== videoId);
+  if (isStaleResponse || !tracks || tracks.length === 0) {
+    const maxRetry = isStaleResponse ? 10 : 5;
+    if (retryCount < maxRetry) {
+      setTimeout(() => updateMVContent(retryCount + 1, token), 1000);
       return;
-    } else if (lyricsArea) {
-      lyricsArea.innerHTML = '<p class="no-lyrics-msg">歌詞情報がありません</p>';
-      lyricsArea.classList.add('no-lyrics');
-      const timer = setTimeout(() => {
-        if (lyricsArea) lyricsArea.classList.add('fade-out');
-      }, 5000);
-      lyricsArea.onmouseenter = () => {
-        clearTimeout(timer);
-        lyricsArea.classList.remove('fade-out');
-      };
-      lyricsArea.onmouseleave = () => {
-        lyricsArea.classList.add('fade-out');
-      };
+    } else {
+      // 字幕トラックが1本も無い動画：外部歌詞（LRCLIB）を探す
+      const gotExternal = await tryExternalLyricsFallback(videoId, lyricsArea, lyricsHeader, token, null);
+      if (token !== mvContentToken) return;
+      if (!gotExternal && lyricsArea) {
+        showNoLyrics(lyricsArea, '歌詞情報がありません');
+      }
     }
     updateMetadataUI();
     try {
@@ -1289,7 +2297,6 @@ async function updateMVContent(retryCount = 0) {
     } catch (e) {}
     return;
   }
-  const videoId = new URLSearchParams(window.location.search).get('v');
   const langList = tracks.map(t => {
     let url = t.baseUrl;
     if (!url) {
@@ -1303,11 +2310,16 @@ async function updateMVContent(retryCount = 0) {
       baseUrl: url
     };
   });
-  const validLangs = langList.filter(t => !t.isAuto);
+  // #3 「自動生成字幕を使わない」オプション（既定ON）。OFFなら自動生成も候補に含める。
+  const validLangs = langList.filter(t => excludeAuto ? !t.isAuto : true);
   if (validLangs.length === 0) {
-    if (lyricsArea) {
-      lyricsArea.innerHTML = '<p class="no-lyrics-msg" style="font-size:16px; opacity:0.6;">自動生成字幕のため非表示</p>';
-      lyricsArea.classList.add('no-lyrics');
+    // 自動生成(ASR)しか無い動画：ここがハイブリッド同期の主戦場。
+    // テキストはLRCLIB、時計はASRから借りて自動整合する。
+    const asrTrack = langList.find(t => t.isAuto) || null;
+    const gotExternal = await tryExternalLyricsFallback(videoId, lyricsArea, lyricsHeader, token, asrTrack);
+    if (token !== mvContentToken) return;
+    if (!gotExternal && lyricsArea) {
+      showNoLyrics(lyricsArea, '自動生成字幕のため非表示', { fontSize: '16px', opacity: '0.6' });
     }
     updateMetadataUI();
     try {
@@ -1315,24 +2327,63 @@ async function updateMVContent(retryCount = 0) {
     } catch (e) {}
     return;
   }
+  const isJaTrack = (t) => /^ja/i.test(t.code || '') || (t.name && t.name.indexOf('日本語') >= 0);
+  const langMatches = (t, code) => {
+    if (!t || !code) return false;
+    const a = (t.code || '').toLowerCase();
+    const b = code.toLowerCase();
+    return a === b || a.startsWith(b) || b.startsWith(a) || t.name === code;
+  };
   const savedLangCode = localStorage.getItem('mv_lyrics_lang_code') || localStorage.getItem('mv_lyrics_lang');
   const savedSubLangCode = localStorage.getItem('mv_lyrics_sub_lang_code') || localStorage.getItem('mv_lyrics_sub_lang') || 'none';
-  let mainTrack = validLangs.find(t => t.code === savedLangCode || t.name === savedLangCode) || validLangs[0];
-  let subTrack = savedSubLangCode !== 'none' ? validLangs.find(t => t.code === savedSubLangCode || t.name === savedSubLangCode) : null;
+  let mainTrack, subTrack;
+  if (autoPriority) {
+    // #4 YouTube Music風：原文（アップロード元の言語）をメイン、日本語をサブに表示。
+    const jaTrack = validLangs.find(isJaTrack);
+    const nativeTrack =
+      (defaultLang && validLangs.find(t => langMatches(t, defaultLang))) ||
+      validLangs.find(t => !isJaTrack(t)) ||
+      validLangs[0];
+    mainTrack = nativeTrack || validLangs[0];
+    subTrack = (jaTrack && jaTrack !== mainTrack) ? jaTrack : null;
+  } else {
+    // 手動優先：ユーザーが選んだ言語を記憶して使う（従来の挙動）。
+    mainTrack = validLangs.find(t => t.code === savedLangCode || t.name === savedLangCode) || validLangs[0];
+    subTrack = savedSubLangCode !== 'none' ? validLangs.find(t => t.code === savedSubLangCode || t.name === savedSubLangCode) : null;
+  }
   const forceIntercept = (track) => {
     if (!track) return Promise.resolve(null);
     return new Promise((resolve) => {
       let timeoutId;
-      const handler = (e) => {
-        window.removeEventListener('YTI_Intercepted_Captions', handler);
+      // メタ情報付きの YTI_CaptionData を使い、別動画・自動翻訳・別言語の
+      // レスポンスを誤って採用しないようにする（遷移直後の混入対策）
+      const langMatch = (a, b) => !a || !b || a === b || a.startsWith(b) || b.startsWith(a);
+      const ccBtnEl = document.querySelector('.ytp-subtitles-button');
+      const ccWasOn = !!(ccBtnEl && ccBtnEl.getAttribute('aria-pressed') === 'true');
+      const finish = (result) => {
+        window.removeEventListener('YTI_CaptionData', handler);
         clearTimeout(timeoutId);
-        resolve(parseCaptionResponse(e.detail));
+        // YTI_ForceChangeTrack（内部でtoggleSubtitlesOn）がCCをONのまま残すと、
+        // YouTubeが字幕言語を記憶して次の動画で外国語・自動翻訳字幕を勝手に
+        // 読み込む汚染源になる。元がOFFだったならOFFへ戻す。
+        try {
+          if (!ccWasOn && ccBtnEl && ccBtnEl.getAttribute('aria-pressed') === 'true') ccBtnEl.click();
+        } catch (e) {}
+        resolve(result);
       };
-      window.addEventListener('YTI_Intercepted_Captions', handler);
-      timeoutId = setTimeout(() => {
-        window.removeEventListener('YTI_Intercepted_Captions', handler);
-        resolve(null);
-      }, 1500);
+      const handler = (e) => {
+        let d = null;
+        try {
+          d = JSON.parse(e.detail);
+        } catch (_) {}
+        if (!d || !d.text) return;
+        if (videoId && d.videoId && d.videoId !== videoId) return;
+        if (d.tlang) return;
+        if (!langMatch(d.lang, track.code)) return;
+        finish(parseCaptionResponse(d.text));
+      };
+      window.addEventListener('YTI_CaptionData', handler);
+      timeoutId = setTimeout(() => finish(null), 2500);
       window.dispatchEvent(new CustomEvent('YTI_ForceChangeTrack', {
         detail: track.code
       }));
@@ -1340,36 +2391,68 @@ async function updateMVContent(retryCount = 0) {
   };
   let newMainRaw = null;
   let newSubRaw = null;
+  // ===== 0秒キャッシュ参照 =====
+  // MAIN世界(page_script.js)がパッシブ収集した字幕を最優先で読む。
+  // ヒットすればYouTubeへの再通信・トラック強制切替を一切行わない。
+  await requestCacheFromPage(videoId);
+  if (token !== mvContentToken) return;
+  newMainRaw = getCachedCaptionForTrack(videoId, mainTrack);
+  if (subTrack) newSubRaw = getCachedCaptionForTrack(videoId, subTrack);
+  // 各フォールバックの合間にも世代チェックを行い、キャンセル済みチェーンが
+  // CCボタンや文字起こしパネルを操作し続けて新しいロードと競合しないようにする
   if (!subTrack) {
-    newMainRaw = await fetchCaptionTrack(mainTrack.baseUrl);
+    if (!newMainRaw || newMainRaw.length === 0) newMainRaw = await fetchCaptionTrack(mainTrack.baseUrl);
+    if (token !== mvContentToken) return;
+    // forceInterceptはトラックを明示指定して切り替えるため、前の動画で記憶された
+    // 外国語の字幕設定をこの動画の正しい言語に戻す効果もある
+    if (!newMainRaw || newMainRaw.length === 0) newMainRaw = await forceIntercept(mainTrack);
+    if (token !== mvContentToken) return;
     if (!newMainRaw || newMainRaw.length === 0) newMainRaw = await interceptFromCCButton();
+    if (token !== mvContentToken) return;
     if (!newMainRaw || newMainRaw.length === 0) newMainRaw = await scrapeTranscriptFromDOM();
   } else {
-    if (targetVideo && targetVideo.readyState < 2) {
-      await new Promise(r => {
-        const onPlay = () => {
-          targetVideo.removeEventListener('playing', onPlay);
-          r();
-        };
-        targetVideo.addEventListener('playing', onPlay);
-        setTimeout(r, 2000);
-      });
-    } else {
-      await new Promise(r => setTimeout(r, 500));
+    // キャッシュで両方そろっていれば、再生待ち・強制切替もスキップ
+    if ((!newSubRaw || newSubRaw.length === 0) || (!newMainRaw || newMainRaw.length === 0)) {
+      if (targetVideo && targetVideo.readyState < 2) {
+        await new Promise(r => {
+          const onPlay = () => {
+            targetVideo.removeEventListener('playing', onPlay);
+            r();
+          };
+          targetVideo.addEventListener('playing', onPlay);
+          setTimeout(r, 2000);
+        });
+      } else {
+        await new Promise(r => setTimeout(r, 500));
+      }
+      if (token !== mvContentToken) return;
     }
-    newSubRaw = await forceIntercept(subTrack);
-    if (!newSubRaw || newSubRaw.length === 0) newSubRaw = await fetchCaptionTrack(subTrack.baseUrl);
-    newMainRaw = await forceIntercept(mainTrack);
-    if (!newMainRaw || newMainRaw.length === 0) newMainRaw = await fetchCaptionTrack(mainTrack.baseUrl);
+    if (!newSubRaw || newSubRaw.length === 0) {
+      newSubRaw = await forceIntercept(subTrack);
+      if (token !== mvContentToken) return;
+      if (!newSubRaw || newSubRaw.length === 0) newSubRaw = await fetchCaptionTrack(subTrack.baseUrl);
+      if (token !== mvContentToken) return;
+    }
     if (!newMainRaw || newMainRaw.length === 0) {
-      newMainRaw = await interceptFromCCButton();
-      if (!newMainRaw || newMainRaw.length === 0) newMainRaw = await scrapeTranscriptFromDOM();
+      newMainRaw = await forceIntercept(mainTrack);
+      if (token !== mvContentToken) return;
+      if (!newMainRaw || newMainRaw.length === 0) newMainRaw = await fetchCaptionTrack(mainTrack.baseUrl);
+      if (token !== mvContentToken) return;
+      if (!newMainRaw || newMainRaw.length === 0) {
+        newMainRaw = await interceptFromCCButton();
+        if (token !== mvContentToken) return;
+        if (!newMainRaw || newMainRaw.length === 0) newMainRaw = await scrapeTranscriptFromDOM();
+      }
     }
   }
+  if (token !== mvContentToken) return;
   if (!newMainRaw || newMainRaw.length === 0) {
-    if (lyricsArea) {
-      lyricsArea.innerHTML = '<p class="no-lyrics-msg">歌詞の取得に失敗しました</p>';
-      lyricsArea.classList.add('no-lyrics');
+    // 字幕トラックはあるのに取得に失敗：外部歌詞へフォールバック
+    const asrTrack = langList.find(t => t.isAuto) || null;
+    const gotExternal = await tryExternalLyricsFallback(videoId, lyricsArea, lyricsHeader, token, asrTrack);
+    if (token !== mvContentToken) return;
+    if (!gotExternal && lyricsArea) {
+      showNoLyrics(lyricsArea, '歌詞の取得に失敗しました');
     }
     updateMetadataUI();
     try {
@@ -1378,6 +2461,7 @@ async function updateMVContent(retryCount = 0) {
     return;
   }
   lyricsData = mergeDualLyrics(newMainRaw, newSubRaw);
+  loadedLyricsVideoId = videoId || '';
   currentLyricsLang = mainTrack.code;
   localStorage.setItem('mv_lyrics_lang_code', mainTrack.code);
   localStorage.setItem('mv_lyrics_sub_lang_code', subTrack ? subTrack.code : 'none');
@@ -1407,7 +2491,10 @@ async function updateMVContent(retryCount = 0) {
       if (subTrack && item.code === subTrack.code) optSub.selected = true;
       subLangSelect.appendChild(optSub);
     });
+    // 連続で言語を切り替えたとき、古い取得結果が後から上書きしないよう世代管理する
+    let langChangeSeq = 0;
     const handleLanguageChange = async () => {
+      const seq = ++langChangeSeq;
       const mCode = mainLangSelect.value;
       const sCode = subLangSelect.value;
       const mTrack = validLangs.find(t => t.code === mCode);
@@ -1416,27 +2503,42 @@ async function updateMVContent(retryCount = 0) {
       showToast('字幕データを読み込み中...');
       let mRaw = null;
       let sRaw = null;
+      // 0秒キャッシュ参照を最優先（ヒットすれば再通信なし）
+      await requestCacheFromPage(videoId);
+      mRaw = getCachedCaptionForTrack(videoId, mTrack);
+      if (sTrack) sRaw = getCachedCaptionForTrack(videoId, sTrack);
       if (!sTrack) {
-        mRaw = await fetchCaptionTrack(mTrack.baseUrl);
+        if (!mRaw || mRaw.length === 0) mRaw = await fetchCaptionTrack(mTrack.baseUrl);
         if (!mRaw || mRaw.length === 0) mRaw = await forceIntercept(mTrack);
         if (!mRaw || mRaw.length === 0) mRaw = await interceptFromCCButton();
         if (!mRaw || mRaw.length === 0) mRaw = await scrapeTranscriptFromDOM();
       } else {
-        sRaw = await forceIntercept(sTrack);
-        if (!sRaw || sRaw.length === 0) sRaw = await fetchCaptionTrack(sTrack.baseUrl);
-        mRaw = await forceIntercept(mTrack);
-        if (!mRaw || mRaw.length === 0) mRaw = await fetchCaptionTrack(mTrack.baseUrl);
+        if (!sRaw || sRaw.length === 0) {
+          sRaw = await forceIntercept(sTrack);
+          if (!sRaw || sRaw.length === 0) sRaw = await fetchCaptionTrack(sTrack.baseUrl);
+        }
         if (!mRaw || mRaw.length === 0) {
-          mRaw = await interceptFromCCButton();
-          if (!mRaw || mRaw.length === 0) mRaw = await scrapeTranscriptFromDOM();
+          mRaw = await forceIntercept(mTrack);
+          if (!mRaw || mRaw.length === 0) mRaw = await fetchCaptionTrack(mTrack.baseUrl);
+          if (!mRaw || mRaw.length === 0) {
+            mRaw = await interceptFromCCButton();
+            if (!mRaw || mRaw.length === 0) mRaw = await scrapeTranscriptFromDOM();
+          }
         }
       }
+      // 取得中に別の動画へ遷移した／さらに新しい切替が始まっていたら適用しない
+      if (seq !== langChangeSeq) return;
+      if ((new URLSearchParams(window.location.search).get('v')) !== videoId) return;
       if (mRaw && mRaw.length > 0) {
         lyricsData = mergeDualLyrics(mRaw, sRaw);
         currentLyricsLang = mCode;
         localStorage.setItem('mv_lyrics_lang_code', mTrack.code);
         localStorage.setItem('mv_lyrics_sub_lang_code', sTrack ? sTrack.code : 'none');
         renderLyricsDOM(lyricsArea);
+        if (asrWordStream) attachKaraokeTiming(asrWordStream);
+        try {
+          syncLyrics();
+        } catch (e) {}
         showToast('言語を切り替えました');
       } else {
         showToast('切り替えに失敗しました');
@@ -1558,6 +2660,17 @@ async function updateMVContent(retryCount = 0) {
     lyricsHeader.appendChild(lrcBtn);
   }
   if (lyricsArea) renderLyricsDOM(lyricsArea);
+  // 手動字幕を表示しつつ、ASRトラックがあれば単語タイミングを非同期で借りて
+  // カラオケ塗りを有効化する（テキストは正しい字幕、時計はASR）
+  try {
+    loadAsrWordsAndAttach(langList.find(t => t.isAuto) || null, videoId, token,
+      (mainTrack && mainTrack.code) || '');
+  } catch (e) {}
+  // 描画直後に一度同期して初期ハイライト＆スクロール位置を確定させる。
+  // （動画が一時停止/バッファリング中で timeupdate が来なくても同期されるように）
+  try {
+    syncLyrics();
+  } catch (e) {}
   updateMetadataUI();
   try {
     updateSidebarContent(0);
@@ -1629,10 +2742,77 @@ function updateSidebarContent(retryCount = 0) {
   if (sidebarTitle) sidebarTitle.innerText = (sourceMode === 'playlist') ? 'プレイリスト' : '次はこちら';
 }
 
+function buildSettingsPanel() {
+  const panel = document.createElement('div');
+  panel.id = 'mv-settings-panel';
+  const makeToggle = (label, desc, key, def, onChange) => {
+    const row = document.createElement('label');
+    row.className = 'mv-setting-row';
+    const txt = document.createElement('div');
+    txt.className = 'mv-setting-text';
+    txt.innerHTML = `<span class="mv-setting-label"></span><span class="mv-setting-desc"></span>`;
+    txt.querySelector('.mv-setting-label').textContent = label;
+    txt.querySelector('.mv-setting-desc').textContent = desc;
+    const sw = document.createElement('span');
+    sw.className = 'mv-setting-switch';
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.checked = getMvOption(key, def);
+    if (input.checked) sw.classList.add('on');
+    const knob = document.createElement('span');
+    knob.className = 'mv-setting-knob';
+    sw.appendChild(input);
+    sw.appendChild(knob);
+    input.onchange = () => {
+      localStorage.setItem(key, input.checked ? 'true' : 'false');
+      sw.classList.toggle('on', input.checked);
+      if (onChange) onChange(input.checked);
+    };
+    row.appendChild(txt);
+    row.appendChild(sw);
+    return row;
+  };
+  const title = document.createElement('div');
+  title.className = 'mv-settings-title';
+  title.textContent = '表示オプション';
+  panel.appendChild(title);
+  panel.appendChild(makeToggle('タイトルを常に表示', '曲名・アーティストを常時表示します', 'mv_always_title', false, (on) => {
+    isTitleAlwaysOn = on;
+    const ia = document.getElementById('mv-info-area');
+    if (ia && on) ia.classList.add('visible');
+    showToast(on ? 'タイトルを常に表示します' : 'タイトルの常時表示を解除しました');
+  }));
+  panel.appendChild(makeToggle('自動生成字幕を使わない', 'AIの自動字幕は歌詞に使いません', 'mv_exclude_auto', true, () => {
+    showToast('設定を変更しました');
+    loadedLyricsVideoId = '';
+    updateMVContent(0);
+  }));
+  panel.appendChild(makeToggle('原文を優先（日本語はサブ）', '海外曲は原語をメイン・日本語を訳として表示', 'mv_lang_auto_priority', true, () => {
+    showToast('設定を変更しました');
+    loadedLyricsVideoId = '';
+    updateMVContent(0);
+  }));
+  panel.appendChild(makeToggle('字幕がない曲は外部歌詞を検索（Beta）', 'LRCLIBから同期歌詞を取得して表示します', 'mv_external_lyrics', false, () => {
+    showToast('設定を変更しました');
+    loadedLyricsVideoId = '';
+    updateMVContent(0);
+  }));
+  panel.appendChild(makeToggle('カラオケ風ハイライト（Beta）', '歌に合わせて現在行を左から塗ります', 'mv_karaoke', false, (on) => {
+    karaokeEnabledCache = on;
+    showToast(on ? 'カラオケ風ハイライトをONにしました' : 'カラオケ風ハイライトをOFFにしました');
+    // OFF中は単語タイミングを取得していないため、ONにしたら歌詞をロードし直して取得する
+    if (on && !asrWordStream) {
+      loadedLyricsVideoId = '';
+      updateMVContent(0);
+    }
+  }));
+  ['click', 'mousedown', 'mouseup'].forEach(evt => panel.addEventListener(evt, e => e.stopPropagation()));
+  return panel;
+}
+
 function onUserAction(e) {
   const infoArea = document.getElementById('mv-info-area');
   const closeBtn = document.getElementById('mv-close-btn');
-  const qrBtn = document.getElementById('mv-qr-btn');
   const shotBtn = document.getElementById('mv-shot-btn');
   const pinBtn = document.getElementById('mv-pin-btn');
   const lyricsHeader = document.getElementById('mv-lyrics-header');
@@ -1651,7 +2831,8 @@ function onUserAction(e) {
   if (infoArea) {
     infoArea.classList.add('visible');
     if (closeBtn) closeBtn.classList.add('visible');
-    if (qrBtn) qrBtn.classList.add('visible');
+    const settingsBtn = document.getElementById('mv-settings-btn');
+    if (settingsBtn) settingsBtn.classList.add('visible');
     if (shotBtn) shotBtn.classList.add('visible');
     if (pinBtn) pinBtn.classList.add('visible');
     if (lyricsHeader) lyricsHeader.classList.add('visible');
@@ -1674,8 +2855,10 @@ function onUserAction(e) {
     if (idleTimer) clearTimeout(idleTimer);
     idleTimer = setTimeout(() => {
       const ia = document.getElementById('mv-info-area');
-      const elems = [document.getElementById('mv-info-area'), document.getElementById('mv-close-btn'), document.getElementById('mv-qr-btn'), document.getElementById('mv-shot-btn'), document.getElementById('mv-pin-btn'), document.getElementById('mv-lyrics-header'), document.getElementById('mv-record-btn'), document.getElementById('mv-glass-btn'), document.getElementById('mv-glass-slider-container'), document.getElementById('mv-pos-slider-container'), document.getElementById('mv-desktop-btn'), document.getElementById('mv-ambient-controls')];
-      if (elems[0] && !isInfoPinned) elems[0].classList.remove('visible');
+      const settingsPanelEl = document.getElementById('mv-settings-panel');
+      if (settingsPanelEl) settingsPanelEl.classList.remove('open');
+      const elems = [document.getElementById('mv-info-area'), document.getElementById('mv-close-btn'), document.getElementById('mv-settings-btn'), document.getElementById('mv-shot-btn'), document.getElementById('mv-pin-btn'), document.getElementById('mv-lyrics-header'), document.getElementById('mv-record-btn'), document.getElementById('mv-glass-btn'), document.getElementById('mv-glass-slider-container'), document.getElementById('mv-pos-slider-container'), document.getElementById('mv-desktop-btn'), document.getElementById('mv-ambient-controls')];
+      if (elems[0] && !isInfoPinned && !isTitleAlwaysOn) elems[0].classList.remove('visible');
       for (let i = 1; i < elems.length; i++) {
         if (elems[i]) elems[i].classList.remove('visible');
       }
@@ -1693,7 +2876,7 @@ function onUserAction(e) {
   }
   if (e && e.type === 'click' && rootContainer) {
     const target = e.target;
-    if (target.closest('button') || target.closest('.mv-glass-btn') || target.closest('#mv-pin-btn') || target.closest('.mv-lyric-action-btn') || target.closest('a') || target.closest('.lyric-line') || target.closest('#mv-sidebar') || target.closest('#shot-result-overlay') || target.closest('#shot-selector-overlay') || target.closest('#mv-qr-overlay') || target.closest('input[type="range"]')) {
+    if (target.closest('button') || target.closest('.mv-glass-btn') || target.closest('#mv-pin-btn') || target.closest('.mv-lyric-action-btn') || target.closest('a') || target.closest('.lyric-line') || target.closest('#mv-sidebar') || target.closest('#shot-result-overlay') || target.closest('#shot-selector-overlay') || target.closest('#mv-settings-panel') || target.closest('input[type="range"]')) {
       return;
     }
     if (targetVideo) {
@@ -1759,16 +2942,10 @@ function syncLyrics() {
     const isActive = (index === activeIndex);
     if (line.el) {
       if (isActive) {
+        // スクロール自体は startSmoothAutoScroll のrAFループが一元管理する。
+        // ここで scrollTo すると毎フレームの直接代入と競合してガタつき・
+        // スクロール不能の原因になるため、activeクラスの付与のみ行う。
         line.el.classList.add('active');
-        if (lyricsArea && !isLyricSelectionMode) {
-          const containerHeight = lyricsArea.clientHeight;
-          const itemTop = line.el.offsetTop;
-          const itemHeight = line.el.clientHeight;
-          lyricsArea.scrollTo({
-            top: itemTop - containerHeight / 2 + itemHeight / 2,
-            behavior: 'smooth'
-          });
-        }
       } else {
         line.el.classList.remove('active');
       }
@@ -1827,9 +3004,14 @@ function showCenterStatus(type) {
   container.classList.add('animate');
 }
 async function startHybridShotSequence() {
-  const video = document.querySelector('.video-stream.html5-main-video');
-  if (!video) return;
   const isMVMode = !!document.getElementById('mv-root-container');
+  // MVモードでは再生中の実体である targetVideo を直接使う。
+  // querySelector でDOMから引き直すと、YouTube が再生成した別の（冒頭=0秒の）
+  // video 要素を掴んでしまい、現在地ではなく冒頭フレームが撮れてしまう。
+  const video = (isMVMode && targetVideo && targetVideo.isConnected) ?
+    targetVideo :
+    (document.querySelector('.video-stream.html5-main-video') || document.querySelector('video'));
+  if (!video) return;
   const btn = document.getElementById('mv-shot-btn');
   if (isMVMode && btn) {
     btn.innerText = "解析中...";
@@ -1852,218 +3034,34 @@ async function startHybridShotSequence() {
   takeSingleScreenShot();
 }
 async function tryBurstCapture(video) {
+  // メタデータ未ロード（初回読み込み時に多い）だと videoWidth/Height が 0 になり、
+  // 0x0 キャンバスで黒画面/エラーになる。準備できていなければ即フォールバックへ。
+  if (!video || !video.videoWidth || !video.videoHeight) {
+    throw new Error("Video not ready");
+  }
   const wasPaused = video.paused;
   const currentTime = video.currentTime;
   const rewindTime = 0.5;
   if (currentTime > rewindTime) {
     video.currentTime = currentTime - rewindTime;
-    await new Promise(r => setTimeout(r, 300));
+    // シーク完了（seeked）を待ってから撮影。待たないと初回は古い/黒いフレームを掴む。
+    await new Promise(r => {
+      let settled = false;
+      const onSeeked = () => {
+        if (settled) return;
+        settled = true;
+        video.removeEventListener('seeked', onSeeked);
+        r();
+      };
+      video.addEventListener('seeked', onSeeked);
+      setTimeout(onSeeked, 400);
+    });
   }
   if (video.paused) {
     try {
       await video.play();
     } catch (e) {}
   }
-  const frames = [];
-  const captureDuration = 1000;
-  const startTime = Date.now();
-  try {
-    while (Date.now() - startTime < captureDuration) {
-      const canvas = document.createElement('canvas');
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
-      const ctx = canvas.getContext('2d');
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-      try {
-        const d = ctx.getImageData(0, 0, 1, 1);
-      } catch (e) {
-        throw new Error("Canvas Tainted");
-      }
-      const score = calculateSharpness(ctx, canvas.width, canvas.height);
-      frames.push({
-        canvas,
-        score
-      });
-      await new Promise(r => requestAnimationFrame(r));
-    }
-  } catch (e) {
-    if (wasPaused) video.pause();
-    video.currentTime = currentTime;
-    throw e;
-  }
-  if (wasPaused) video.pause();
-  video.currentTime = currentTime;
-  frames.sort((a, b) => b.score - a.score);
-  return frames;
-}
-
-function showShotSelector(frames) {
-  const old = document.getElementById('shot-selector-overlay');
-  if (old) old.remove();
-  const overlay = document.createElement('div');
-  overlay.id = 'shot-selector-overlay';
-  Object.assign(overlay.style, {
-    position: 'fixed',
-    top: 0,
-    left: 0,
-    width: '100%',
-    height: '100%',
-    background: 'rgba(0,0,0,0.85)',
-    zIndex: 2147483650,
-    display: 'flex',
-    flexDirection: 'column',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backdropFilter: 'blur(10px)',
-    padding: '20px',
-    boxSizing: 'border-box'
-  });
-  ['click', 'mousedown', 'mouseup', 'touchstart', 'touchend', 'keydown'].forEach(evt => {
-    overlay.addEventListener(evt, stopProp);
-  });
-  const title = document.createElement('h2');
-  title.innerText = "ベストショットを選択";
-  title.style.color = "#fff";
-  title.style.marginBottom = "15px";
-  title.style.flexShrink = "0";
-  overlay.appendChild(title);
-  const listScrollArea = document.createElement('div');
-  Object.assign(listScrollArea.style, {
-    width: '100%',
-    display: 'flex',
-    justifyContent: 'center',
-    maxHeight: '70vh',
-    overflowY: 'auto',
-    minHeight: '0'
-  });
-  const list = document.createElement('div');
-  Object.assign(list.style, {
-    display: 'grid',
-    gridTemplateColumns: 'repeat(3, 1fr)',
-    gap: '15px',
-    width: '90%',
-    maxWidth: '1000px',
-    height: 'fit-content',
-    paddingBottom: '20px'
-  });
-  const renderImages = (targetFrames) => {
-    targetFrames.forEach((f, index) => {
-      const img = document.createElement('img');
-      img.src = f.canvas.toDataURL('image/png');
-      Object.assign(img.style, {
-        width: '100%',
-        aspectRatio: '16/9',
-        objectFit: 'cover',
-        cursor: 'pointer',
-        borderRadius: '12px',
-        border: '2px solid transparent',
-        background: '#000',
-        opacity: '0',
-        animation: `gorgeous-slide-up 0.6s cubic-bezier(0.16, 1, 0.3, 1) forwards ${index * 0.05}s`
-      });
-      img.onmouseenter = () => {};
-      img.onmouseleave = () => {};
-      img.onclick = async (e) => {
-        stopProp(e);
-        selectedSnapshotCanvas = cropCanvasBlackBars(f.canvas);
-        const rect = img.getBoundingClientRect();
-        const clone = img.cloneNode(true);
-        Object.assign(clone.style, {
-          position: 'fixed',
-          top: `${rect.top}px`,
-          left: `${rect.left}px`,
-          width: `${rect.width}px`,
-          height: `${rect.height}px`,
-          zIndex: '2147483660',
-          transition: 'all 0.5s cubic-bezier(0.16, 1, 0.3, 1)',
-          borderRadius: '12px',
-          objectFit: 'cover',
-          boxShadow: '0 0 0 rgba(0,0,0,0)',
-          opacity: '1',
-          animation: 'none'
-        });
-        document.body.appendChild(clone);
-        overlay.style.transition = 'opacity 0.3s ease';
-        overlay.style.opacity = '0';
-        overlay.style.transform = 'scale(0.98)';
-        requestAnimationFrame(() => {
-          const targetHeight = window.innerHeight * 0.85;
-          const ratio = f.canvas.width / f.canvas.height;
-          const targetWidth = targetHeight * ratio;
-          Object.assign(clone.style, {
-            top: '50%',
-            left: '50%',
-            width: `${targetWidth}px`,
-            height: `${targetHeight}px`,
-            transform: 'translate(-50%, -50%)',
-            boxShadow: '0 30px 60px rgba(0,0,0,0.5)'
-          });
-        });
-        await new Promise(r => setTimeout(r, 450));
-        showChekiEditor(frames);
-        setTimeout(() => {
-          clone.remove();
-          overlay.remove();
-        }, 100);
-      };
-      list.appendChild(img);
-    });
-  };
-  renderImages(frames.slice(0, 6));
-  listScrollArea.appendChild(list);
-  overlay.appendChild(listScrollArea);
-  const actionArea = document.createElement('div');
-  Object.assign(actionArea.style, {
-    marginTop: '15px',
-    display: 'flex',
-    gap: '15px',
-    flexShrink: '0'
-  });
-  if (frames.length > 6) {
-    const showAllBtn = document.createElement('button');
-    showAllBtn.innerHTML = `
-            <svg viewBox="0 0 24 24" style="width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;margin-right:4px;"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
-            すべて表示 (${frames.length}枚)
-        `;
-    showAllBtn.className = "cheki-btn secondary";
-    showAllBtn.onclick = (e) => {
-      stopProp(e);
-      showAllBtn.remove();
-      const remaining = frames.slice(6);
-      let index = 0;
-      const chunkSize = 3;
-      const processChunk = () => {
-        const chunk = remaining.slice(index, index + chunkSize);
-        if (chunk.length > 0) {
-          renderImages(chunk);
-          index += chunkSize;
-          requestAnimationFrame(processChunk);
-        }
-      };
-      processChunk();
-    };
-    actionArea.appendChild(showAllBtn);
-  }
-  const closeBtn = document.createElement('button');
-  closeBtn.innerHTML = `
-        <svg viewBox="0 0 24 24" style="width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;margin-right:4px;"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-        キャンセル
-    `;
-  closeBtn.className = "cheki-btn secondary";
-  closeBtn.onclick = (e) => {
-    stopProp(e);
-    overlay.remove();
-  };
-  actionArea.appendChild(closeBtn);
-  overlay.appendChild(actionArea);
-  getTargetContainer().appendChild(overlay);
-}
-async function tryBurstCapture(video) {
-  const wasPaused = video.paused;
-  const currentTime = video.currentTime;
-  const rewindTime = 0.5;
-  if (currentTime > rewindTime) video.currentTime = currentTime - rewindTime;
-  if (video.paused) await video.play();
   const frames = [];
   const captureDuration = 1000;
   const startTime = Date.now();
@@ -2096,11 +3094,19 @@ async function tryBurstCapture(video) {
   if (wasPaused) video.pause();
   video.currentTime = currentTime;
   frames.sort((a, b) => b.score - a.score);
+  // 全フレームが真っ黒/ほぼ無地（score≈0）なら撮影失敗とみなし、単写フォールバックへ。
+  if (frames.length === 0 || !frames[0] || frames[0].score <= 0) {
+    throw new Error("Blank frames");
+  }
   return frames;
 }
 async function takeSingleScreenShot() {
-  const video = document.querySelector('.video-stream.html5-main-video');
+  const isMVMode = !!document.getElementById('mv-root-container');
+  const video = (isMVMode && targetVideo && targetVideo.isConnected) ?
+    targetVideo :
+    (document.querySelector('.video-stream.html5-main-video') || document.querySelector('video'));
   const btn = document.getElementById('mv-shot-btn');
+  if (!video) return;
   const wasPaused = video.paused;
   video.pause();
   const overlay = document.getElementById('mv-overlay-content');
@@ -2936,31 +3942,26 @@ function createIpodElement() {
                     <div class="ipod-screen-glass"></div>
                     <div class="ipod-header">
                         <span id="ipod-time-display">12:42 PM</span>
+                        <span class="ipod-now-playing-label">Now Playing</span>
                         <div class="ipod-battery-icon"><div class="ipod-battery-level"></div></div>
                     </div>
 
-                    <div class="ipod-content-split">
-                        <div class="ipod-cover-art-large">
-                            <div class="ipod-cover-placeholder">
-                                <svg viewBox="0 0 24 24"><path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"/></svg>
+                    <div class="ipod-video-stage" id="ipod-video-stage">
+                        <div class="ipod-video-placeholder" id="ipod-video-placeholder">
+                            <svg viewBox="0 0 24 24"><path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"/></svg>
+                        </div>
+                        <div class="ipod-np-overlay" id="ipod-np-overlay">
+                            <div class="ipod-np-meta">
+                                <div class="ipod-np-title" id="ipod-title">Now Playing</div>
+                                <div class="ipod-np-artist" id="ipod-artist">YouTube</div>
                             </div>
-                        </div>
-                        <div class="ipod-info-side">
-                            <div class="ipod-track-info">
-                                <div class="ipod-text-title" id="ipod-title">Now Playing</div>
-                                <div class="ipod-text-artist" id="ipod-artist">YouTube</div>
-                                <div class="ipod-text-album" id="ipod-album">Immersion Mode</div>
+                            <div class="ipod-scrubber-bar" id="ipod-scrubber">
+                                <div class="ipod-scrubber-fill" id="ipod-scrubber-fill"></div>
                             </div>
-                        </div>
-                    </div>
-
-                    <div class="ipod-progress-area">
-                        <div class="ipod-scrubber-bar" id="ipod-scrubber">
-                            <div class="ipod-scrubber-fill" id="ipod-scrubber-fill"></div>
-                        </div>
-                        <div class="ipod-time-labels">
-                            <span id="ipod-current-time">0:00</span>
-                            <span id="ipod-duration-time">-3:42</span>
+                            <div class="ipod-time-labels">
+                                <span id="ipod-current-time">0:00</span>
+                                <span id="ipod-duration-time">-3:42</span>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -3027,6 +4028,37 @@ async function enableIpodPiP() {
     }
     ipodPiPWindow.document.body.classList.add('ipod-pip-body');
     ipodPiPWindow.document.body.appendChild(ipodEl);
+    // 実再生中の動画要素をそのまま iPod の画面内へ移動して、iPodの画面で
+    // 動画が流れているように見せる（Document PiP の定石）。閉じる時に元へ戻す。
+    const realVideo = targetVideo || document.querySelector('.video-stream.html5-main-video') || document.querySelector('video');
+    let ipodReturnParent = null;
+    let ipodReturnNext = null;
+    let videoStyleBackup = null;
+    const stage = ipodPiPWindow.document.getElementById('ipod-video-stage');
+    if (stage && realVideo) {
+      ipodReturnParent = realVideo.parentNode;
+      ipodReturnNext = realVideo.nextSibling;
+      videoStyleBackup = realVideo.getAttribute('style');
+      realVideo.classList.add('ipod-live-video');
+      const ph = ipodPiPWindow.document.getElementById('ipod-video-placeholder');
+      if (ph) ph.style.display = 'none';
+      stage.insertBefore(realVideo, stage.firstChild);
+    }
+    const restoreVideo = () => {
+      try {
+        if (!realVideo) return;
+        realVideo.classList.remove('ipod-live-video');
+        if (videoStyleBackup !== null) realVideo.setAttribute('style', videoStyleBackup);
+        else realVideo.removeAttribute('style');
+        if (ipodReturnParent) {
+          if (ipodReturnNext && ipodReturnNext.parentNode === ipodReturnParent) {
+            ipodReturnParent.insertBefore(realVideo, ipodReturnNext);
+          } else {
+            ipodReturnParent.appendChild(realVideo);
+          }
+        }
+      } catch (e) {}
+    };
     const syncData = () => {
       if (!ipodPiPWindow) return;
       const doc = ipodPiPWindow.document;
@@ -3038,27 +4070,7 @@ async function enableIpodPiP() {
       if (titleEl) titleEl.innerText = cleanTitle || "Unknown";
       const artistEl = doc.getElementById('ipod-artist');
       if (artistEl) artistEl.innerText = cleanArtist || "YouTube";
-      const artContainer = doc.querySelector('.ipod-cover-art-large');
-      if (artContainer) {
-        let thumbUrl = null;
-        try {
-          thumbUrl = getHighResThumbnail();
-        } catch (e) {}
-        if (!thumbUrl) {
-          thumbUrl = document.querySelector('meta[property="og:image"]')?.content;
-        }
-        if (thumbUrl) {
-          let img = artContainer.querySelector('img.ipod-real-art');
-          if (!img) {
-            artContainer.innerHTML = '';
-            img = doc.createElement('img');
-            img.className = 'ipod-real-art';
-            artContainer.appendChild(img);
-          }
-          if (img.src !== thumbUrl) img.src = thumbUrl;
-        }
-      }
-      const video = targetVideo || document.querySelector('video');
+      const video = realVideo || targetVideo || document.querySelector('video');
       if (video) {
         const cur = video.currentTime;
         const dur = video.duration;
@@ -3128,6 +4140,7 @@ async function enableIpodPiP() {
     });
     ipodPiPWindow.addEventListener('pagehide', () => {
       clearInterval(syncInterval);
+      restoreVideo();
       ipodPiPWindow = null;
     });
   } catch (err) {}
@@ -3147,40 +4160,56 @@ let recalcTimer = null;
 
 function startSmoothAutoScroll(container) {
   if (scrollFrameId) cancelAnimationFrame(scrollFrameId);
+  // 手動スクロール（ホイール／タッチ）中は自動スクロールを一時停止し、
+  // 少し経ったら現在の行へ戻る。従来は毎フレーム引き戻されて手動で読めなかった。
+  if (!container._userScrollHooked) {
+    container._userScrollHooked = true;
+    const markUserScroll = () => {
+      userScrollUntil = Date.now() + 2500;
+    };
+    container.addEventListener('wheel', markUserScroll, { passive: true });
+    container.addEventListener('touchmove', markUserScroll, { passive: true });
+  }
   const updateScroll = () => {
-    if (!container || isLyricSelectionMode || container.classList.contains('selecting')) {
-      scrollFrameId = requestAnimationFrame(updateScroll);
-      return;
-    }
-    const activeEl = container.querySelector('.lyric-line-container.active');
-    if (activeEl) {
-      if (activeEl !== lastActiveEl) {
-        const wasInstrumental = lastActiveEl && lastActiveEl.classList.contains('instrumental-line');
-        const containerHeight = container.clientHeight;
-        const elHeight = activeEl.clientHeight;
-        
-        cachedTargetScroll = activeEl.offsetTop - (containerHeight / 2) + (elHeight / 2);
+    // 例外が起きてもループを止めない（1度の例外で自動スクロールが死ぬのを防ぐ）
+    try {
+      // カラオケ塗りは timeupdate(約4Hz)では粗いため、このrAFループで毎フレーム更新する
+      updateKaraokeFill();
+      if (!container || !container.isConnected || isLyricSelectionMode ||
+          container.classList.contains('selecting') || Date.now() < userScrollUntil) {
+        scrollFrameId = requestAnimationFrame(updateScroll);
+        return;
+      }
+      const activeEl = container.querySelector('.lyric-line-container.active');
+      if (activeEl) {
+        if (activeEl !== lastActiveEl) {
+          const wasInstrumental = lastActiveEl && lastActiveEl.classList.contains('instrumental-line');
+          const containerHeight = container.clientHeight;
+          const elHeight = activeEl.clientHeight;
 
-        
-        if (wasInstrumental) {
-          if (recalcTimer) clearTimeout(recalcTimer);
-          recalcTimer = setTimeout(() => {
-            
-            if (activeEl === container.querySelector('.lyric-line-container.active')) {
-              cachedTargetScroll = activeEl.offsetTop - (containerHeight / 2) + (elHeight / 2);
-            }
-          }, 600);
+          cachedTargetScroll = activeEl.offsetTop - (containerHeight / 2) + (elHeight / 2);
+
+
+          if (wasInstrumental) {
+            if (recalcTimer) clearTimeout(recalcTimer);
+            recalcTimer = setTimeout(() => {
+
+              if (activeEl === container.querySelector('.lyric-line-container.active')) {
+                cachedTargetScroll = activeEl.offsetTop - (containerHeight / 2) + (elHeight / 2);
+              }
+            }, 600);
+          }
+          lastActiveEl = activeEl;
         }
-        lastActiveEl = activeEl;
-      }
-      if (cachedTargetScroll !== null) {
-        const currentScrollTop = container.scrollTop;
-        const diff = cachedTargetScroll - currentScrollTop;
-        if (Math.abs(diff) > 0.5) {
-          container.scrollTop = currentScrollTop + (diff * 0.25);
+        if (cachedTargetScroll !== null) {
+          const currentScrollTop = container.scrollTop;
+          const diff = cachedTargetScroll - currentScrollTop;
+          if (Math.abs(diff) > 0.5) {
+            container.scrollTop = currentScrollTop + (diff * 0.25);
+          }
         }
       }
-    }
+    } catch (e) {}
     scrollFrameId = requestAnimationFrame(updateScroll);
   };
   updateScroll();
@@ -3190,6 +4219,11 @@ function stopSmoothAutoScroll() {
   if (scrollFrameId) {
     cancelAnimationFrame(scrollFrameId);
     scrollFrameId = null;
+  }
+  // 保留中の再計算タイマーが古いコンテナの座標を次のセッションに書き込まないように
+  if (recalcTimer) {
+    clearTimeout(recalcTimer);
+    recalcTimer = null;
   }
 }
 

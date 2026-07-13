@@ -23,6 +23,11 @@ let idleTimer = null;
 let buttonObserverTimer = null;
 let isInfoPinned = localStorage.getItem('mv_pin_mode') === 'true';
 let isTitleAlwaysOn = localStorage.getItem('mv_always_title') === 'true';
+// UI全体の拡大率（ユーザー設定）。モニター自動補正に掛け合わせる倍率で、既定は1.0。
+let userUiScale = (() => {
+  const v = parseFloat(localStorage.getItem('mv_ui_scale'));
+  return (!isNaN(v) && v >= 0.7 && v <= 1.4) ? v : 1;
+})();
 // 真偽オプションの取得（未設定なら既定値）
 function getMvOption(key, def) {
   const v = localStorage.getItem(key);
@@ -301,7 +306,7 @@ async function startMVMode(isAuto = false, isHotSwap = false) {
                 bottom: 60px;
                 right: 60px;
 
-                height: var(--mv-lyrics-height, 300px);
+                height: var(--mv-lyrics-height, calc((100vh - 60px) * 0.4));
                 top: auto;
 
                 width: 70vw;
@@ -320,7 +325,7 @@ async function startMVMode(isAuto = false, isHotSwap = false) {
 
             #mv-lyrics-header {
                 position: absolute;
-                bottom: calc(60px + var(--mv-lyrics-height, 300px) + 20px);
+                bottom: calc(60px + var(--mv-lyrics-height, calc((100vh - 60px) * 0.4)) + 20px);
                 right: 60px;
                 width: 40vw;
                 max-width: 500px;
@@ -342,7 +347,7 @@ async function startMVMode(isAuto = false, isHotSwap = false) {
                 flex-direction: column;
                 align-items: flex-end;
                 justify-content: center;
-                margin-bottom: 32px;
+                margin-bottom: calc(32px * var(--yti-scale, 1));
                 position: relative;
 
                 transform-origin: right center;
@@ -351,7 +356,7 @@ async function startMVMode(isAuto = false, isHotSwap = false) {
             }
 
             .lyric-line {
-                font-size: 32px;
+                font-size: calc(32px * var(--yti-scale, 1));
                 font-weight: 700;
 
                 color: rgba(255, 255, 255, 0.15);
@@ -393,7 +398,7 @@ async function startMVMode(isAuto = false, isHotSwap = false) {
             #mv-center-status.animate { animation: mv-icon-pop 0.8s cubic-bezier(0.25, 0.1, 0.25, 1) forwards; }
             @keyframes mv-icon-pop { 0% { opacity: 0; transform: translate(-50%, -50%) scale(0.8); } 15% { opacity: 1; transform: translate(-50%, -50%) scale(1.0); } 30% { opacity: 1; transform: translate(-50%, -50%) scale(1.05); } 100% { opacity: 0; transform: translate(-50%, -50%) scale(1.2); } }
             .mv-status-svg { width: 40px; height: 40px; fill: #fff; display: none; }
-            #mv-song-title { font-size: 42px; font-weight: 800; margin: 0 0 8px 0; line-height: 1.1; letter-spacing: -0.02em; color: #ffffff; text-shadow: 0 2px 10px rgba(0, 0, 0, 0.7); white-space: nowrap; overflow: hidden; display: block; max-width: 40vw; }
+            #mv-song-title { font-size: calc(42px * var(--yti-scale, 1)); font-weight: 800; margin: 0 0 8px 0; line-height: 1.1; letter-spacing: -0.02em; color: #ffffff; text-shadow: 0 2px 10px rgba(0, 0, 0, 0.7); white-space: nowrap; overflow: hidden; display: block; max-width: 40vw; }
             #mv-song-title.marquee { display: flex; width: fit-content; }
             #mv-song-title.marquee span { display: inline-block; padding-right: 50px; animation: scroll-left 18s ease-in infinite; }
             @keyframes scroll-left { 0% { transform: translateX(0); } 20% { transform: translateX(0); } 100% { transform: translateX(-100%); } }
@@ -441,7 +446,7 @@ async function startMVMode(isAuto = false, isHotSwap = false) {
             <div id="mv-lyrics-area"></div>
             <div id="mv-pos-slider-container" style="position: absolute; bottom: 30px; right: 60px; z-index: 2000; display: flex; align-items: center; gap: 8px; opacity: 0; transition: opacity 0.3s; pointer-events: none;">
                 <span style="font-size: 10px; font-weight: 700; color: rgba(255,255,255,0.5);">POS</span>
-<input type="range" id="mv-pos-slider" min="100" max="900" value="300" style="width: 80px; height: 4px; border-radius: 2px; -webkit-appearance: none; background: rgba(255,255,255,0.2); outline: none; cursor: pointer;">            </div>
+<input type="range" id="mv-pos-slider" min="20" max="100" value="40" style="width: 80px; height: 4px; border-radius: 2px; -webkit-appearance: none; background: rgba(255,255,255,0.2); outline: none; cursor: pointer;">            </div>
 
             <div class="mv-header-group left">
                 <button id="mv-shot-btn" class="mv-glass-btn"><svg viewBox="0 0 24 24" style="width:17px;height:17px;margin-right:7px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg> Shot</button>
@@ -557,14 +562,27 @@ async function startMVMode(isAuto = false, isHotSwap = false) {
       glassSlider.onclick = (e) => e.stopPropagation();
       const posSlider = overlayContent.querySelector('#mv-pos-slider');
       if (posSlider) {
-        const savedHeight = localStorage.getItem('mv_lyrics_height') || '300';
-        posSlider.value = savedHeight;
-        rootContainer.style.setProperty('--mv-lyrics-height', savedHeight + 'px');
+        // 歌詞エリアの高さは「利用可能な縦幅に対する割合(%)」で保持する。
+        // モニター解像度に依存せず、100%で歌詞エリアの上端が画面最上部に到達する。
+        // （height = (100vh - 下端60px) * v/100、bottom:60px 固定）
+        let saved = parseFloat(localStorage.getItem('mv_lyrics_height_vh'));
+        if (isNaN(saved)) {
+          // 旧バージョンの px 絶対値（100〜900）を割合に換算して引き継ぐ
+          const legacyPx = parseFloat(localStorage.getItem('mv_lyrics_height'));
+          saved = !isNaN(legacyPx) ? Math.round(legacyPx / 1080 * 100) : 40;
+        }
+        saved = Math.min(100, Math.max(20, saved));
+        const applyLyricsHeight = (v) => {
+          rootContainer.style.setProperty('--mv-lyrics-height', `calc((100vh - 60px) * ${v} / 100)`);
+        };
+        posSlider.value = saved;
+        applyLyricsHeight(saved);
+        localStorage.setItem('mv_lyrics_height_vh', saved);
         posSlider.oninput = (e) => {
           e.stopPropagation();
           const val = e.target.value;
-          rootContainer.style.setProperty('--mv-lyrics-height', val + 'px');
-          localStorage.setItem('mv_lyrics_height', val);
+          applyLyricsHeight(val);
+          localStorage.setItem('mv_lyrics_height_vh', val);
         };
         posSlider.onclick = (e) => e.stopPropagation();
         posSlider.onmousedown = (e) => e.stopPropagation();
@@ -678,9 +696,11 @@ async function startMVMode(isAuto = false, isHotSwap = false) {
       }
     }, 100);
     document.body.appendChild(rootContainer);
+    updateUiScale();
     document.addEventListener('fullscreenchange', onFullscreenChange);
     document.addEventListener('mousemove', onUserAction);
     document.addEventListener('click', onUserAction);
+    window.addEventListener('resize', updateUiScale);
     onUserAction();
   }
   if (!rootContainer.contains(targetVideo)) {
@@ -713,6 +733,21 @@ async function startMVMode(isAuto = false, isHotSwap = false) {
     setTimeout(() => document.getElementById('mv-info-area')?.classList.add('visible'), 150);
   }
   if (targetVideo.paused) targetVideo.play();
+}
+
+// モニター（画面解像度）に依存せず、UIが常に同じ体感サイズに見えるように
+// ビューポート高さから拡大率 --yti-scale を算出して #mv-root-container に適用する。
+// 参照高さ1000px（一般的なノートPCの表示高さ）を1.0とし、極端な値はクランプする。
+// リサイズ・モニター間移動・フルスクリーン切替のたびに再計算する。
+function updateUiScale() {
+  if (!rootContainer) return;
+  const h = window.innerHeight || 1000;
+  let scale = h / 1000;
+  if (scale < 0.85) scale = 0.85;
+  if (scale > 1.7) scale = 1.7;
+  // ユーザーが設定パネルで指定した好みの倍率を掛け合わせる（モニター間の一定さは維持）
+  scale *= userUiScale;
+  rootContainer.style.setProperty('--yti-scale', scale.toFixed(3));
 }
 
 function endMVMode(keepActive = false) {
@@ -756,6 +791,7 @@ function endMVMode(keepActive = false) {
   cachedTargetScroll = null;
   document.removeEventListener('mousemove', onUserAction);
   document.removeEventListener('click', onUserAction);
+  window.removeEventListener('resize', updateUiScale);
   if (!keepActive) {
     targetVideo = null;
     sessionStorage.removeItem('mv_mode_active');
@@ -2772,10 +2808,52 @@ function buildSettingsPanel() {
     row.appendChild(sw);
     return row;
   };
+  const makeSlider = (label, desc, opts, getInit, onInput) => {
+    const row = document.createElement('div');
+    row.className = 'mv-setting-row mv-setting-slider-row';
+    const head = document.createElement('div');
+    head.className = 'mv-setting-slider-head';
+    const txt = document.createElement('div');
+    txt.className = 'mv-setting-text';
+    txt.innerHTML = `<span class="mv-setting-label"></span><span class="mv-setting-desc"></span>`;
+    txt.querySelector('.mv-setting-label').textContent = label;
+    txt.querySelector('.mv-setting-desc').textContent = desc;
+    const valBadge = document.createElement('span');
+    valBadge.className = 'mv-setting-value';
+    head.appendChild(txt);
+    head.appendChild(valBadge);
+    const input = document.createElement('input');
+    input.type = 'range';
+    input.className = 'mv-setting-range';
+    input.min = opts.min;
+    input.max = opts.max;
+    input.step = opts.step;
+    input.value = getInit();
+    const fmt = opts.format || ((v) => v);
+    valBadge.textContent = fmt(input.value);
+    input.oninput = (e) => {
+      e.stopPropagation();
+      valBadge.textContent = fmt(input.value);
+      onInput(input.value);
+    };
+    input.onmousedown = (e) => e.stopPropagation();
+    input.onclick = (e) => e.stopPropagation();
+    row.appendChild(head);
+    row.appendChild(input);
+    return row;
+  };
   const title = document.createElement('div');
   title.className = 'mv-settings-title';
   title.textContent = '表示オプション';
   panel.appendChild(title);
+  panel.appendChild(makeSlider('UIの大きさ', '歌詞や文字などの表示サイズを調整します',
+    { min: 70, max: 140, step: 5, format: (v) => v + '%' },
+    () => Math.round(userUiScale * 100),
+    (v) => {
+      userUiScale = parseFloat(v) / 100;
+      localStorage.setItem('mv_ui_scale', String(userUiScale));
+      updateUiScale();
+    }));
   panel.appendChild(makeToggle('タイトルを常に表示', '曲名・アーティストを常時表示します', 'mv_always_title', false, (on) => {
     isTitleAlwaysOn = on;
     const ia = document.getElementById('mv-info-area');

@@ -38,20 +38,6 @@ html[data-mv-mode="true"] #comments {
   backface-visibility: hidden !important
 }
 
-#mv-root-container video {
-  position: absolute !important;
-  top: 0 !important;
-  left: 0 !important;
-  width: 100% !important;
-  height: 100% !important;
-  object-fit: contain !important;
-  background: #000 !important;
-  z-index: 0 !important;
-  transform: translatez(0) !important;
-  will-change: transform !important;
-  backface-visibility: hidden !important
-}
-
 #mv-overlay-content {
   position: absolute;
   top: 0;
@@ -61,23 +47,69 @@ html[data-mv-mode="true"] #comments {
   z-index: 10;
   pointer-events: none;
   background: transparent;
+  transition: opacity 0.45s ease;
+}
+
+/* 入場中（全画面への遷移中）は曲名・操作UIを丸ごと描かない。
+   遷移が終わったら1枚のレイヤーとしてフェードインさせる（content.js: revealMvUi） */
+#mv-root-container.yti-entering #mv-overlay-content {
+  opacity: 0;
+  visibility: hidden;
 }
 
 .mv-glass-btn {
   pointer-events: auto;
   cursor: pointer;
   background: rgba(10, 10, 10, 0.5);
-  backdrop-filter: blur(30px);
-  -webkit-backdrop-filter: blur(30px);
+  /* 映像の上のすりガラスは、映像のフレームが変わるたびにぼかしを計算し直す。
+     半径に比例して重くなるので、見た目がほぼ変わらない範囲で小さくし、彩度で補う */
+  backdrop-filter: blur(16px) saturate(160%);
+  -webkit-backdrop-filter: blur(16px) saturate(160%);
   border: 1px solid rgba(255, 255, 255, 0.12);
   color: rgba(255, 255, 255, 0.95);
-  transition: all 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: opacity 0.35s cubic-bezier(0.4, 0, 0.2, 1), background-color 0.35s cubic-bezier(0.4, 0, 0.2, 1), border-color 0.35s cubic-bezier(0.4, 0, 0.2, 1), color 0.35s cubic-bezier(0.4, 0, 0.2, 1), box-shadow 0.35s cubic-bezier(0.4, 0, 0.2, 1), transform 0.35s cubic-bezier(0.4, 0, 0.2, 1);
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.25), 0 1px 3px rgba(0, 0, 0, 0.1);
   font-weight: 600;
   letter-spacing: 0.03em;
   display: flex;
   align-items: center;
   justify-content: center
+}
+
+/* ===== ボタン内アイコンの統一 =====
+   以前はSVGごとにインラインで大きさ(15/16/17px)・線の太さ(2/2.5)・塗りが
+   バラバラに指定されていて、並べた時に太さも大きさも揃っていなかった。
+   すべて線画16px・太さ2に統一し、意図的な塗りだけ .mv-ico-solid で示す。 */
+.mv-glass-btn {
+  gap: 7px
+}
+
+.mv-glass-btn svg {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round
+}
+
+.mv-lyric-action-btn svg {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 auto;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round
+}
+
+.mv-glass-btn svg .mv-ico-solid,
+.mv-lyric-action-btn svg .mv-ico-solid {
+  fill: currentColor;
+  stroke: none
 }
 
 .mv-glass-btn:hover {
@@ -128,7 +160,7 @@ html[data-mv-mode="true"] #comments {
   color: #fff;
   opacity: 0;
   transform: translatey(20px);
-  transition: all 0.6s cubic-bezier(0.16, 1, 0.3, 1);
+  transition: opacity 0.6s cubic-bezier(0.16, 1, 0.3, 1), transform 0.6s cubic-bezier(0.16, 1, 0.3, 1);
   pointer-events: auto
 }
 
@@ -212,8 +244,10 @@ html[data-mv-mode="true"] #comments {
   font-feature-settings: "palt";
   letter-spacing: 0.02em;
   white-space: pre-wrap;
-  word-break: break-all;
+  word-break: auto-phrase;
+  line-break: strict;
   overflow-wrap: break-word;
+  text-wrap: pretty;
   max-width: 100%;
   transition: transform 0.6s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.6s cubic-bezier(0.16, 1, 0.3, 1), text-shadow 0.6s cubic-bezier(0.16, 1, 0.3, 1);
   transform: translatez(0);
@@ -324,15 +358,29 @@ html[data-mv-mode="true"] #comments {
   font-size: 12px
 }
 
-.ytp-mv-mode-button {
-  vertical-align: top;
-  display: inline-block;
-  padding: 0 10px;
-  font-weight: bold;
+/* プレイヤー右下に置く拡張のボタン（MVモード / Mini Player）。
+   純正ボタンと同じグループに入り、大きさ（新UIは48x40・旧UIは48x48）は
+   .ytp-button の指定にそのまま従う。アイコンだけ純正と同じ24pxに揃える。 */
+.ytp-yti-btn {
+  display: inline-flex !important;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  padding: 0 !important;
+  border: none;
+  background: transparent;
+  color: inherit;
   cursor: pointer;
-  color: #fff;
-  line-height: 48px;
-  font-size: 14px
+  vertical-align: top
+}
+
+#movie_player .ytp-yti-btn svg {
+  display: block;
+  width: 24px !important;
+  height: 24px !important;
+  fill: none;
+  stroke: currentColor;
+  filter: none
 }
 
 #mv-pin-btn {
@@ -345,7 +393,7 @@ html[data-mv-mode="true"] #comments {
   border-radius: 24px;
   font-size: 13px;
   opacity: 0;
-  transition: all 0.4s ease;
+  transition: opacity 0.4s ease, background-color 0.4s ease, color 0.4s ease, border-color 0.4s ease, box-shadow 0.4s ease, transform 0.35s ease;
   display: flex;
   align-items: center
 }
@@ -372,7 +420,7 @@ html[data-mv-mode="true"] #comments {
   pointer-events: none;
   border-radius: 24px;
   font-size: 13px;
-  transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1)
+  transition: opacity 0.4s cubic-bezier(0.4, 0, 0.2, 1), background-color 0.35s ease, color 0.35s ease, border-color 0.35s ease, box-shadow 0.35s ease, transform 0.35s ease
 }
 
 #mv-desktop-btn {
@@ -386,7 +434,7 @@ html[data-mv-mode="true"] #comments {
   pointer-events: none;
   border-radius: 24px;
   font-size: 13px;
-  transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1)
+  transition: opacity 0.4s cubic-bezier(0.4, 0, 0.2, 1), background-color 0.35s ease, color 0.35s ease, border-color 0.35s ease, box-shadow 0.35s ease, transform 0.35s ease
 }
 
 #mv-shot-btn.visible,
@@ -479,8 +527,8 @@ html[data-mv-mode="true"] #comments {
   pointer-events: auto;
   cursor: pointer;
   background: rgba(10, 10, 10, 0.5);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
+  backdrop-filter: blur(12px) saturate(150%);
+  -webkit-backdrop-filter: blur(12px) saturate(150%);
   border: 1px solid rgba(255, 255, 255, 0.15);
   border-radius: 24px;
   padding: 8px 18px;
@@ -864,14 +912,17 @@ html[data-mv-mode="true"] #comments {
 .record-mode-layout {
   display: flex;
   width: 92vw;
-  height: 92vh;
+  /* 上端の操作ボタン列（top:30px + 高さ42px）と重ならない高さにする */
+  height: calc(100vh - 176px);
   align-items: center;
   justify-content: center;
   gap: 4vw;
   opacity: 0;
   transform: translate(-50%, -45%) scale(0.92);
   filter: blur(20px);
-  transition: opacity 0.8s cubic-bezier(0.16, 1, 0.3, 1), transform 0.8s cubic-bezier(0.16, 1, 0.3, 1), filter 0.8s cubic-bezier(0.16, 1, 0.3, 1);
+  transition: opacity 0.8s cubic-bezier(0.16, 1, 0.3, 1), transform 0.8s cubic-bezier(0.16, 1, 0.3, 1), filter 0.8s cubic-bezier(0.16, 1, 0.3, 1), visibility 0s linear 0.8s;
+  /* レコードモード以外では描画対象から外す（ぼかし付きの全画面レイヤーを抱え続けない） */
+  visibility: hidden;
   pointer-events: none;
   position: absolute;
   top: 50%;
@@ -882,6 +933,8 @@ html[data-mv-mode="true"] #comments {
   opacity: 1;
   transform: translate(-50%, -50%) scale(1);
   filter: blur(0);
+  visibility: visible;
+  transition-delay: 0s;
   pointer-events: auto
 }
 
@@ -897,7 +950,7 @@ html[data-mv-mode="true"] #comments {
   z-index: 2;
   opacity: 0;
   transform: translatex(-40px);
-  transition: all 0.8s cubic-bezier(0.16, 1, 0.3, 1);
+  transition: opacity 0.8s cubic-bezier(0.16, 1, 0.3, 1), transform 0.8s cubic-bezier(0.16, 1, 0.3, 1);
   transition-delay: 0.1s
 }
 
@@ -928,7 +981,7 @@ html[data-mv-mode="true"] #comments {
 }
 
 .rm-lyrics-container {
-  height: 55vh;
+  height: min(55vh, calc(100vh - 420px));
   overflow-y: hidden;
   position: relative;
   mask-image: linear-gradient(to bottom, transparent 0%, black 20%, black 80%, transparent 100%);
@@ -969,7 +1022,7 @@ html[data-mv-mode="true"] #comments {
   margin: 0 auto;
   opacity: 0;
   transform: scale(0.8) rotate(-15deg);
-  transition: all 1s cubic-bezier(0.34, 1.56, 0.64, 1);
+  transition: opacity 1s cubic-bezier(0.34, 1.56, 0.64, 1), transform 1s cubic-bezier(0.34, 1.56, 0.64, 1);
   transition-delay: 0.05s
 }
 
@@ -1175,7 +1228,7 @@ html[data-mv-mode="true"] #comments {
   z-index: 20;
   opacity: 0;
   pointer-events: none;
-  transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1)
+  transition: opacity 0.4s cubic-bezier(0.4, 0, 0.2, 1), background-color 0.35s ease, color 0.35s ease, border-color 0.35s ease, box-shadow 0.35s ease, transform 0.35s ease
 }
 
 #mv-record-btn,
@@ -1188,12 +1241,14 @@ html[data-mv-mode="true"] #comments {
   align-items: center
 }
 
-#mv-record-btn {
-  right: 230px
-}
-
-#mv-glass-btn {
-  right: 350px
+/* 右上のボタンは .mv-header-group.right の flex 列に並ぶ（位置指定はしない）。
+   Glass とスライダーはレコードモード専用なので、それ以外では場所ごと消す。
+   固定ボタンはレコードモードでは使えないため、透明なまま場所を取らないよう消す。 */
+#mv-root-container:not(.record-mode) #mv-glass-btn,
+#mv-root-container:not(.record-mode) #mv-glass-slider-container,
+#mv-root-container:not(.glass-mode) #mv-glass-slider-container,
+#mv-root-container.record-mode #mv-pin-btn {
+  display: none !important
 }
 
 #mv-record-btn.visible,
@@ -1209,9 +1264,8 @@ html[data-mv-mode="true"] #comments {
 }
 
 #mv-glass-slider-container {
-  right: 490px;
-  top: 39px;
   width: 140px;
+  height: 42px;
   display: flex;
   align-items: center
 }
@@ -1247,356 +1301,6 @@ html[data-mv-mode="true"] #comments {
   cursor: pointer;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3), inset 0 1px 1px rgba(255, 255, 255, 0.5);
   transition: all 0.2s
-}
-
-#ipod-pip-container {
-  width: 100%;
-  height: 100%;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  background: transparent;
-  overflow: hidden;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  user-select: none
-}
-
-.ipod-pip-body {
-  margin: 0;
-  padding: 0;
-  width: 100vw;
-  height: 100vh;
-  overflow: hidden;
-  background: linear-gradient(to bottom, #dcdcdc 0%, #e8e8e8 5%, #c8c8c8 100%)
-}
-
-#ipod-pip-container .ipod-chassis {
-  width: 100%;
-  height: 100%;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: space-between;
-  padding: 20px 15px 30px 15px;
-  box-sizing: border-box;
-  position: relative;
-  background: url("data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI1IiBoZWlnaHQ9IjUiPgo8cmVjdCB3aWR0aD0iNSIgaGVpZ2h0PSI1IiBmaWxsPSIjZmZmIiBmaWxsLW9wYWNpdHk9IjAuMDMiLz4KPC9zdmc+"), linear-gradient(to right, rgba(255, 255, 255, 0.4) 0%, rgba(255, 255, 255, 0.1) 10%, rgba(0, 0, 0, 0.05) 50%, rgba(255, 255, 255, 0.1) 90%, rgba(255, 255, 255, 0.4) 100%), linear-gradient(to bottom, #dcdcdc 0%, #d4d4d4 100%);
-  background-blend-mode: overlay, normal, normal
-}
-
-#ipod-pip-container .ipod-chassis::after {
-  content: "";
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  box-shadow: inset 0 0 20px rgba(0, 0, 0, 0.15);
-  pointer-events: none;
-  z-index: 10
-}
-
-.ipod-screen-frame {
-  width: 100%;
-  flex: 1;
-  max-height: 55%;
-  background: #000;
-  border-radius: 8px;
-  padding: 2px;
-  box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.6), 0 1px 0 rgba(255, 255, 255, 0.3);
-  position: relative;
-  margin-bottom: 20px;
-  display: flex;
-  flex-direction: column
-}
-
-.ipod-screen {
-  width: 100%;
-  height: 100%;
-  background: #fff;
-  border-radius: 6px;
-  position: relative;
-  overflow: hidden;
-  display: flex;
-  flex-direction: column
-}
-
-.ipod-screen-glass {
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 45%;
-  background: linear-gradient(to bottom, rgba(255, 255, 255, 0.15) 0%, rgba(255, 255, 255, 0.02) 100%);
-  border-radius: 6px 6px 60% 60%/6px 6px 10px 10px;
-  pointer-events: none;
-  z-index: 20
-}
-
-.ipod-header {
-  height: 22px;
-  background: linear-gradient(to bottom, #c5cad4 0%, #9ca2ae 100%);
-  border-bottom: 1px solid #7a808b;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 0 8px;
-  color: #000;
-  font-size: 10px;
-  font-weight: 700;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
-  z-index: 5
-}
-
-.ipod-battery-icon {
-  width: 18px;
-  height: 8px;
-  border: 1px solid #555;
-  border-radius: 2px;
-  position: relative;
-  padding: 1px
-}
-
-.ipod-battery-icon::after {
-  content: "";
-  position: absolute;
-  right: -3px;
-  top: 2px;
-  width: 2px;
-  height: 4px;
-  background: #555;
-  border-radius: 0 1px 1px 0
-}
-
-.ipod-battery-level {
-  width: 70%;
-  height: 100%;
-  background: linear-gradient(to bottom, #86e066 0%, #3dc112 100%)
-}
-
-.ipod-now-playing-label {
-  font-size: 9px;
-  font-weight: 700;
-  color: #333;
-  letter-spacing: 0.3px;
-  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.4)
-}
-
-/* 動画がiPodの画面で再生されるステージ */
-.ipod-video-stage {
-  flex: 1;
-  position: relative;
-  background: #000;
-  overflow: hidden;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 0
-}
-
-.ipod-video-stage .ipod-live-video,
-.ipod-live-video {
-  position: absolute !important;
-  top: 0 !important;
-  left: 0 !important;
-  width: 100% !important;
-  height: 100% !important;
-  max-width: 100% !important;
-  max-height: 100% !important;
-  object-fit: contain !important;
-  background: #000 !important;
-  transform: none !important;
-  margin: 0 !important;
-  padding: 0 !important;
-  border: 0 !important;
-  z-index: 1
-}
-
-.ipod-video-placeholder {
-  width: 100%;
-  height: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: radial-gradient(circle at 50% 38%, #333 0%, #111 100%);
-  color: rgba(255, 255, 255, 0.22)
-}
-
-.ipod-video-placeholder svg {
-  width: 44px;
-  height: 44px;
-  fill: currentColor
-}
-
-/* 動画の上に重なる Now Playing 情報＋スクラバー */
-.ipod-np-overlay {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  z-index: 15;
-  padding: 18px 10px 8px 10px;
-  background: linear-gradient(to bottom, rgba(0, 0, 0, 0) 0%, rgba(0, 0, 0, 0.55) 45%, rgba(0, 0, 0, 0.82) 100%);
-  color: #fff;
-  transition: opacity 0.4s ease
-}
-
-.ipod-np-meta {
-  margin-bottom: 7px
-}
-
-.ipod-np-title {
-  font-size: 12px;
-  font-weight: 700;
-  line-height: 1.2;
-  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis
-}
-
-.ipod-np-artist {
-  font-size: 10px;
-  font-weight: 600;
-  color: rgba(255, 255, 255, 0.72);
-  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  margin-top: 2px
-}
-
-.ipod-scrubber-bar {
-  width: 100%;
-  height: 6px;
-  background: rgba(255, 255, 255, 0.25);
-  border-radius: 4px;
-  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.45);
-  overflow: hidden;
-  position: relative;
-  cursor: pointer
-}
-
-.ipod-scrubber-fill {
-  width: 0%;
-  height: 100%;
-  background: linear-gradient(to bottom, #fdfdfd 0%, #d6d6d6 100%);
-  box-shadow: 0 0 5px rgba(255, 255, 255, 0.55);
-  transition: width 0.2s linear
-}
-
-.ipod-time-labels {
-  display: flex;
-  justify-content: space-between;
-  font-size: 9px;
-  color: rgba(255, 255, 255, 0.85);
-  margin-top: 4px;
-  font-weight: 600;
-  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9)
-}
-
-.ipod-wheel-area {
-  flex: 0 0 auto;
-  width: 100%;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  padding-bottom: 10px
-}
-
-.ipod-click-wheel {
-  width: 160px;
-  height: 160px;
-  background: #1a1a1a;
-  border-radius: 50%;
-  position: relative;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5), inset 0 1px 2px rgba(0, 0, 0, 0.4);
-  background: linear-gradient(to bottom, #2b2b2b 0%, #111 100%);
-  cursor: pointer
-}
-
-.ipod-click-wheel:active {
-  transform: scale(0.995)
-}
-
-.ipod-center-btn {
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  width: 54px;
-  height: 54px;
-  border-radius: 50%;
-  background: linear-gradient(to bottom, #e6e6e6 0%, #d0d0d0 100%);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.6), inset 0 1px 1px rgba(255, 255, 255, 0.9);
-  cursor: pointer;
-  transition: all 0.1s
-}
-
-.ipod-center-btn:active {
-  background: linear-gradient(to bottom, #c0c0c0 0%, #d0d0d0 100%);
-  box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.3)
-}
-
-.wheel-label {
-  position: absolute;
-  color: #999;
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.5px;
-  pointer-events: auto;
-  cursor: pointer;
-  font-family: "SF Pro Text", "Helvetica Neue", sans-serif;
-  z-index: 10;
-  display: flex;
-  justify-content: center;
-  align-items: center
-}
-
-.wheel-label::before {
-  content: "";
-  position: absolute;
-  top: -15px;
-  left: -15px;
-  right: -15px;
-  bottom: -15px
-}
-
-.wheel-label:active {
-  opacity: 0.7
-}
-
-.label-menu {
-  top: 22px;
-  left: 50%;
-  transform: translatex(-50%)
-}
-
-.label-play {
-  bottom: 22px;
-  left: 50%;
-  transform: translatex(-50%);
-  gap: 4px
-}
-
-.label-prev {
-  top: 50%;
-  left: 20px;
-  transform: translatey(-50%)
-}
-
-.label-next {
-  top: 50%;
-  right: 20px;
-  transform: translatey(-50%)
-}
-
-.wheel-icon {
-  fill: #999;
-  width: 12px;
-  height: 12px
 }
 
 .lyric-line-container.instrumental-line {
@@ -2071,7 +1775,10 @@ input:checked+.slider:before {
   margin-top: 6px;
   transition: opacity 0.6s cubic-bezier(0.16, 1, 0.3, 1);
   white-space: pre-wrap;
-  word-break: break-all;
+  word-break: auto-phrase;
+  line-break: strict;
+  overflow-wrap: break-word;
+  text-wrap: pretty;
   transform: translatez(0);
 }
 
@@ -2184,7 +1891,7 @@ input:checked+.slider:before {
   border-radius: 50%;
   opacity: 0;
   pointer-events: none;
-  transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: opacity 0.4s cubic-bezier(0.4, 0, 0.2, 1), background-color 0.35s ease, border-color 0.35s ease, box-shadow 0.35s ease, transform 0.35s ease;
 }
 #mv-settings-btn.visible {
   opacity: 1;
@@ -2198,9 +1905,12 @@ input:checked+.slider:before {
   right: 30px;
   width: 320px;
   max-width: 80vw;
+  max-height: calc(100vh - 110px);
+  overflow-y: auto;
+  scrollbar-width: none;
   background: rgba(18, 18, 20, 0.82);
-  backdrop-filter: blur(30px);
-  -webkit-backdrop-filter: blur(30px);
+  backdrop-filter: blur(20px) saturate(160%);
+  -webkit-backdrop-filter: blur(20px) saturate(160%);
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 16px;
   box-shadow: 0 16px 50px rgba(0, 0, 0, 0.5);
@@ -2402,3 +2112,399 @@ input:checked+.slider:before {
 #mv-info-area {
   z-index: 2;
 }
+
+/* ===== 黒帯カット（letterbox.js） ===== */
+/* MVモード：黒帯・画面比率の隙間を、映像の端を折り返して延長した光で覆う。
+   キャンバスは幅128pxで描き（ぼかし・境目の溶かしもキャンバス内で済ませる）、
+   拡大はGPUの合成に任せる。CSSの filter や動画への mask は使わない（重いため）。 */
+#mv-lbx-ambient {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 1;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.6s ease;
+}
+
+#mv-root-container.yti-lbx-active #mv-lbx-ambient {
+  opacity: 1;
+}
+
+/* 通常再生：プレイヤー枠を黒帯を除いた比率にし、動画をその分だけ拡大する。
+   YouTube自身の全画面（[fullscreen]）では枠を変えない。 */
+ytd-watch-flexy.yti-lbx-crop:not([fullscreen]) {
+  --ytd-watch-flexy-width-ratio: var(--yti-lbx-wr) !important;
+  --ytd-watch-flexy-height-ratio: var(--yti-lbx-hr) !important;
+}
+
+#movie_player.yti-lbx-crop video.html5-main-video {
+  transform: scale(var(--yti-lbx-s, 1)) !important;
+  transform-origin: 50% 50% !important;
+}
+
+/* 字幕（CC）の左右の位置。YouTubeは字幕の窓の位置を「枠に収めた動画」（黒帯カット中は
+   拡大前の、左右に隙間のある細い矩形）を基準に計算するので、左寄せの字幕（自動生成など）が
+   拡大後の映像より内側に寄る。入れ物を動画と同じ倍率で横に伸ばして位置を合わせ、
+   窓は逆の倍率で縮めて字の形を戻す。縮める基準は窓の揃え方（左・中央・右）に合わせる。
+   縦は合わせない（下の字幕は枠の下端基準のままが正しく、合わせると枠の外へ出る）。
+   transform で入れ物が重なりの単位になり、拡大中の動画の下に潜るので、
+   字幕の窓と同じ z-index を入れ物に持たせる（操作バーより下）。 */
+#movie_player.yti-lbx-crop .ytp-caption-window-container {
+  transform: scaleX(var(--yti-lbx-s, 1));
+  z-index: 41;
+}
+
+#movie_player.yti-lbx-crop .caption-window {
+  transform: scaleX(calc(1 / var(--yti-lbx-s, 1)));
+  transform-origin: 50% 50%;
+}
+
+#movie_player.yti-lbx-crop .caption-window[style*="text-align: left"] {
+  transform-origin: 0 50%;
+}
+
+#movie_player.yti-lbx-crop .caption-window[style*="text-align: right"] {
+  transform-origin: 100% 50%;
+}
+
+/* YouTubeの新プレイヤー（ytp-delhi-modern）の一部の試験では、全画面で動画のタイトルを
+   下に出すための配置（ytp-fullscreen-metadata-bottom）が全画面でない時にも付き、
+   下の字幕が「操作バー＋154px」持ち上げられたままになる（操作バーが隠れても戻らない）。
+   黒帯カットで枠が低くなると、字幕が画面の中ほどまで上がって見える。
+   全画面以外では、通常の配置（操作バーの分だけ上げ、隠れたら下端）に戻す。 */
+#movie_player.ytp-delhi-modern.ytp-fullscreen-metadata-bottom:not(.ytp-fullscreen) .caption-window.ytp-caption-window-bottom {
+  margin-bottom: calc(var(--yt-delhi-bottom-controls-height, 72px) + 14px);
+}
+
+#movie_player.ytp-delhi-modern.ytp-fullscreen-metadata-bottom.ytp-big-mode:not(.ytp-fullscreen) .caption-window.ytp-caption-window-bottom {
+  margin-bottom: calc(var(--yt-delhi-big-mode-bottom-controls-height, 96px) + 14px);
+}
+
+#movie_player.ytp-delhi-modern.ytp-fullscreen-metadata-bottom:is(.ytp-autohide, .ytp-hide-controls, .ytp-muted-autoplay):not(.ytp-fullscreen) .caption-window.ytp-caption-window-bottom {
+  margin-bottom: 0;
+}
+
+/* 韓国語の読み（korean_ruby.js）。ハングルの塊の上にカタカナを小さく振る。
+   切っている間の .lyric-ko はただのインラインなので、行の折り返しは変わらない。
+   カラオケ塗り（background-clip: text）は子孫の字にも掛かるので、ルビも一緒に塗られる。 */
+.yti-korean-ruby .lyric-ko {
+  display: inline-block;
+  text-align: center;
+  text-indent: 0
+}
+
+.yti-korean-ruby .lyric-ko::before {
+  content: attr(data-ruby);
+  display: block;
+  font-size: 0.42em;
+  font-weight: 600;
+  line-height: 1.3;
+  letter-spacing: 0;
+  text-align: center;
+  white-space: nowrap
+}
+
+/* YouTube の字幕（CC）にも同じ読みを振る（korean_ruby.js が字幕の行を包む）。
+   プレイヤーは字幕の窓の高さを包む前に測って固定し、はみ出しを隠すので、
+   読みを含む窓だけ高さを中身に合わせる（下揃えの窓は上へ伸びる）。
+   字幕の黒い下地が読みまで覆うよう、行を inline-block にする。 */
+.yti-korean-ruby #movie_player .caption-window:has(.lyric-ko) {
+  height: auto !important;
+  overflow: visible !important
+}
+
+.yti-korean-ruby #movie_player .ytp-caption-segment:has(.lyric-ko) {
+  display: inline-block
+}
+
+.yti-korean-ruby #movie_player .ytp-caption-segment .lyric-ko::before {
+  font-size: 0.5em
+}
+
+/* ===== 語単位のカラオケ（karaoke_words.js。YTM-Immersion の Apple Music 風の文字同期と同じ） =====
+   JS が渡すもの:
+     行に  --sweep   行の先頭から塗りが進んだ px（毎フレーム）
+           --feather 塗りの境目のぼかし半幅 px
+     語に  --wx      その語が行の先頭から何 px 目に始まるか
+           --wg      光の強さ 0〜1（伸ばした音だけ）
+           --wglowa / --wglowr  その語の光の最大の濃さ・半径
+   塗りを語ごとの 0→1 ではなく「行を流れる1本の先端」として持つので、
+   語の変わり目でぼかしが途切れず、先端がひと続きに流れる。 */
+#mv-root-container.karaoke-on .lyric-line-container.active:not(.instrumental-line) .lyric-line.yti-wsync {
+  color: #ffffff !important;
+  background-image: none !important;
+  -webkit-background-clip: border-box !important;
+  background-clip: border-box !important;
+  /* 語ごとの光と重なると行がのっぺり白く飛ぶ */
+  text-shadow: none !important;
+}
+.lyric-line .yti-w,
+.lyric-line-bg .yti-w {
+  /* 語の中は1つのテキストとして組ませる（1字ずつ切るとカーニングが効かず字の間が空く） */
+  display: inline-block;
+  white-space: pre;
+  transform-origin: 50% 78%;
+  transition: none;
+}
+#mv-root-container.karaoke-on .lyric-line-container.active .lyric-line.yti-wsync .yti-w,
+#mv-root-container.karaoke-on .lyric-line-container.active .lyric-line-bg.yti-wsync .yti-w {
+  background-image: linear-gradient(90deg,
+    currentColor calc((var(--sweep, 0) - var(--wx, 0) - var(--feather, 10)) * 1px),
+    color-mix(in srgb, currentColor 38%, transparent) calc((var(--sweep, 0) - var(--wx, 0) + var(--feather, 10)) * 1px));
+  background-repeat: no-repeat;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  /* 半径は語ごとに固定し、動かすのは濃さだけ（半径を動かすと毎フレーム影を描き直す） */
+  text-shadow: 0 0 calc(var(--wglowr, 0) * 1em)
+    color-mix(in srgb, #ffffff calc(var(--wg, 0) * var(--wglowa, 0) * 100%), transparent);
+}
+
+/* ハモリ（背景の声）：本編の下に小さく薄く */
+.lyric-line-bg {
+  display: block;
+  font-size: calc(20px * var(--yti-scale, 1));
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.3);
+  margin-top: 4px;
+  white-space: pre-wrap;
+  word-break: auto-phrase;
+}
+.lyric-line-container.active .lyric-line-bg {
+  color: rgba(255, 255, 255, 0.55);
+}
+
+/* ===== 広告・一時停止の確認・再生の操作（player_guard.js） ===== */
+#yti-ad-bar {
+  position: absolute; top: 24px; left: 50%; transform: translateX(-50%); z-index: 3000;
+  display: none; align-items: center; gap: 12px; padding: 8px 10px 8px 16px; border-radius: 999px;
+  background: rgba(20, 20, 24, 0.72); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+  color: #fff; font-size: 14px; border: 1px solid rgba(255, 255, 255, 0.14);
+}
+#mv-root-container.yti-ad #yti-ad-bar { display: flex; }
+#yti-ad-bar .yti-ad-label { font-weight: 700; color: #ffd166; }
+#yti-ad-bar .yti-ad-remain { opacity: 0.8; font-variant-numeric: tabular-nums; }
+#yti-ad-bar .yti-ad-skip, #yti-continue button {
+  border: 0; border-radius: 999px; padding: 7px 14px; font-weight: 700; cursor: pointer;
+  background: #fff; color: #000; font-size: 13px;
+}
+#mv-root-container.yti-ad #mv-lyrics-area,
+#mv-root-container.yti-ad #mv-lyrics-header { opacity: 0.15 !important; transition: opacity 0.4s; }
+
+#yti-continue {
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 3100;
+  display: flex; flex-direction: column; align-items: center; gap: 14px; padding: 22px 26px; max-width: 420px;
+  border-radius: 18px; background: rgba(20, 20, 24, 0.82); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+  color: #fff; font-size: 15px; text-align: center; border: 1px solid rgba(255, 255, 255, 0.16);
+}
+
+#yti-transport {
+  position: absolute; left: 50%; bottom: 18px; transform: translateX(-50%); z-index: 2100;
+  width: min(760px, calc(100% - 48px)); display: flex; align-items: center; gap: 10px; padding: 8px 14px;
+  border-radius: 999px; background: rgba(20, 20, 24, 0.45); backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px);
+  border: 1px solid rgba(255, 255, 255, 0.12); color: #fff; font-size: 12px; font-variant-numeric: tabular-nums;
+  opacity: 1; transition: opacity 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+}
+#mv-root-container.hide-cursor #yti-transport { opacity: 0; pointer-events: none; }
+#mv-root-container.record-mode #yti-transport { bottom: 10px; }
+#yti-transport .yti-tp-btn {
+  width: 30px; height: 30px; flex: 0 0 30px; display: grid; place-items: center; padding: 0; border: 0;
+  border-radius: 50%; background: transparent; cursor: pointer;
+}
+#yti-transport .yti-tp-btn:hover { background: rgba(255, 255, 255, 0.14); }
+#yti-transport .yti-tp-btn svg { width: 20px; height: 20px; fill: #fff; }
+#yti-transport .yti-tp-seek { flex: 1 1 auto; min-width: 60px; accent-color: #fff; }
+#yti-transport .yti-tp-vol { flex: 0 0 72px; width: 72px; accent-color: #fff; }
+#yti-transport.yti-tp-ad .yti-tp-seek,
+#yti-transport.yti-tp-ad [data-act="prev"],
+#yti-transport.yti-tp-ad [data-act="next"] { opacity: 0.3; pointer-events: none; }
+@media (max-width: 720px) {
+  #yti-transport .yti-tp-vol, #yti-transport [data-act="mute"] { display: none; }
+}
+
+/* ===== 訳・読み（language.js） ===== */
+.lyric-line-reading {
+  display: block;
+  font-size: calc(15px * var(--yti-scale, 1));
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  color: rgba(255, 255, 255, 0.4);
+  margin-bottom: 2px;
+  white-space: pre-wrap;
+}
+.lyric-line-container.active .lyric-line-reading { color: rgba(255, 255, 255, 0.75); }
+.lyric-line ruby rt {
+  font-size: 0.42em;
+  font-weight: 600;
+  letter-spacing: 0;
+  opacity: 0.85;
+}
+/* 端末内翻訳の訳は、人の訳と区別できるよう少しだけ斜めに */
+.lyric-line-container.yti-sub-machine .lyric-line-sub { font-style: italic; }
+.mv-setting-select {
+  flex: 0 0 auto;
+  max-width: 150px;
+  padding: 6px 8px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+  font-size: 13px;
+}
+.mv-setting-select option { color: #000; }
+
+/* ===== パート分け（歌割り）と推し（parts.js） ===== */
+#mv-lyrics-area.yti-parts-on .lyric-line-container.yti-has-part::after {
+  content: '';
+  position: absolute;
+  right: 2px;
+  top: 14%;
+  bottom: 14%;
+  width: 4px;
+  border-radius: 2px;
+  background: var(--part-color);
+  opacity: 0.5;
+  pointer-events: none;
+}
+#mv-lyrics-area.yti-parts-on .lyric-line-container.yti-has-part.active::after { opacity: 1; }
+.yti-part-tag {
+  position: absolute;
+  right: 14px;
+  top: -15px;
+  font-size: calc(11px * var(--yti-scale, 1));
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: rgba(255, 255, 255, 0.5);
+  white-space: nowrap;
+  pointer-events: none;
+}
+.lyric-line-container.active .yti-part-tag { color: #fff; }
+#mv-lyrics-area.yti-oshi-on .lyric-line-container.yti-not-oshi { opacity: 0.35; transition: opacity 0.4s; }
+#mv-lyrics-area.yti-oshi-on .lyric-line-container.yti-is-oshi.active .lyric-line {
+  text-shadow: 0 0 18px rgba(255, 255, 255, 0.55) !important;
+}
+#yti-parts-bar {
+  position: absolute;
+  left: 24px;
+  bottom: 74px;
+  z-index: 2150;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-width: min(46vw, 640px);
+  opacity: 1;
+  transition: opacity 0.4s;
+}
+#mv-root-container.hide-cursor #yti-parts-bar:not(.editing) { opacity: 0; pointer-events: none; }
+.yti-part-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(20, 20, 24, 0.5);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  color: #fff;
+  font-size: 12px;
+  cursor: pointer;
+}
+.yti-part-chip .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--c); }
+.yti-part-chip .st { opacity: 0.6; font-variant-numeric: tabular-nums; }
+.yti-part-chip.oshi { border-color: var(--c); box-shadow: 0 0 0 1px var(--c) inset; }
+.yti-part-chip.oshi .nm::before { content: '★ '; color: var(--c); }
+.yti-part-chip.selected { background: rgba(255, 255, 255, 0.22); }
+.yti-part-chip.add { border-style: dashed; }
+.yti-part-hint { font-size: 11px; color: rgba(255, 255, 255, 0.55); align-self: center; }
+
+/* ===== 応援法・コール（chants.js） ===== */
+#yti-chant {
+  position: absolute;
+  right: 60px;
+  top: 16%;
+  z-index: 2050;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+  pointer-events: none;
+}
+#yti-chant .yti-chant-now,
+#yti-chant .yti-chant-soon { display: none; }
+#yti-chant.now .yti-chant-now {
+  display: block;
+  padding: 10px 22px;
+  border-radius: 999px;
+  background: linear-gradient(135deg, #ffd166, #ff6b8b);
+  color: #1a1a1a;
+  font-weight: 900;
+  font-size: calc(30px * var(--yti-scale, 1));
+  letter-spacing: 0.03em;
+  box-shadow: 0 8px 30px rgba(255, 107, 139, 0.45);
+  animation: yti-chant-pop 0.25s cubic-bezier(0.2, 1.4, 0.4, 1);
+}
+#yti-chant.soon .yti-chant-soon {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 14px;
+  border-radius: 999px;
+  background: rgba(20, 20, 24, 0.55);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  color: #fff;
+  font-size: calc(16px * var(--yti-scale, 1));
+  font-weight: 700;
+}
+#yti-chant .yti-chant-soon .lbl { color: #ffd166; font-size: 0.8em; }
+#yti-chant .yti-chant-soon .bar { width: 60px; height: 4px; border-radius: 2px; background: rgba(255, 255, 255, 0.2); overflow: hidden; }
+#yti-chant .yti-chant-soon .bar i { display: block; height: 100%; background: #ffd166; transform-origin: left; transform: scaleX(0); }
+@keyframes yti-chant-pop { from { transform: scale(0.7); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+
+#yti-chant-panel {
+  position: absolute;
+  left: 24px;
+  top: 90px;
+  z-index: 3050;
+  width: min(380px, calc(100% - 48px));
+  max-height: 60vh;
+  overflow: auto;
+  padding: 14px;
+  border-radius: 16px;
+  background: rgba(20, 20, 24, 0.82);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  color: #fff;
+  font-size: 13px;
+}
+#yti-chant-panel .hd { font-weight: 800; font-size: 15px; display: flex; align-items: center; gap: 6px; margin-bottom: 10px; }
+#yti-chant-panel .hd .sub { font-weight: 500; font-size: 11px; opacity: 0.6; }
+#yti-chant-panel .hd .x { margin-left: auto; background: none; border: 0; color: #fff; font-size: 18px; cursor: pointer; }
+#yti-chant-panel .add, #yti-chant-panel .row { display: flex; gap: 6px; margin-bottom: 10px; align-items: center; }
+#yti-chant-panel input[type="text"], #yti-chant-panel textarea {
+  flex: 1;
+  padding: 7px 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+  font-size: 13px;
+}
+#yti-chant-panel textarea { width: 100%; box-sizing: border-box; min-height: 90px; margin: 8px 0; }
+#yti-chant-panel button.now, #yti-chant-panel button.imp {
+  border: 0; border-radius: 10px; padding: 7px 12px; background: #fff; color: #000; font-weight: 700; cursor: pointer; white-space: nowrap;
+}
+#yti-chant-panel .row label { flex: 1; font-size: 12px; opacity: 0.8; }
+#yti-chant-panel .it { display: flex; align-items: center; gap: 8px; padding: 4px 0; border-top: 1px solid rgba(255, 255, 255, 0.06); }
+#yti-chant-panel .it .tm { background: none; border: 0; color: #ffd166; font-variant-numeric: tabular-nums; cursor: pointer; }
+#yti-chant-panel .it .tt { flex: 1; }
+#yti-chant-panel .it .del { background: none; border: 0; color: rgba(255, 255, 255, 0.5); cursor: pointer; font-size: 11px; }
+#yti-chant-panel summary { cursor: pointer; opacity: 0.8; }
+
+/* ===== 共有（community.js） ===== */
+.yti-share-row { flex-wrap: wrap; }
+.yti-share-btns { display: flex; gap: 6px; flex: 0 0 auto; }

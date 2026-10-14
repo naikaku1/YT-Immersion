@@ -1,9 +1,16 @@
+// 読み込まれている content.js が新旧どちらかを一目で判別するための目印。
+// 拡張機能のリロードが効いていない時は、この行がコンソールに出ない。
+console.info('%c[YT Immersion] build 0.10.0 / lyrics-core-v1', 'background:#0a84ff;color:#fff;padding:2px 6px;border-radius:4px;font-weight:700');
+
 document.addEventListener('yt-navigate-finish', onNavigate);
 document.addEventListener('yt-page-data-updated', () => {
-  if (rootContainer) {
+  // MVモードを閉じていても Mini Player(PiP) が開いていれば歌詞は追従させる
+  if (rootContainer || pipWindow) {
     setTimeout(() => {
-      if (!rootContainer) return; // 遅延中にMVモードが終了していたら何もしない
+      if (!rootContainer && !pipWindow) return; // 遅延中に両方閉じていたら何もしない
       updateMetadataUI();
+      // 同じ動画の読み込みが進行中なら二重に走らせない（字幕の強制切替どうしが競合する）
+      if (ytiLoadingVideoId && ytiLoadingVideoId === getVideoId() && lyricsLoadDoneVideoId !== ytiLoadingVideoId) return;
       updateMVContent(0);
       updateSidebarContent(0);
     }, 2500);
@@ -12,6 +19,12 @@ document.addEventListener('yt-page-data-updated', () => {
 window.addEventListener('load', init);
 let lastTitle = "";
 let lastLyricIndex = -1;
+// 歌詞DOMを組み直すたびに増やす世代番号。Mini Player(PiP)側はこれを見て
+// 曲・言語の切り替わりを検知し、自分の歌詞リストを作り直す。
+let lyricsRenderVersion = 0;
+// syncLyrics が管理する現在のアクティブ行。毎フレームの querySelector を避けるため
+// 自動スクロールのrAFループからも参照する。
+let activeLyricLine = null;
 let originalParent = null;
 let originalNextSibling = null;
 let targetVideo = null;
@@ -44,6 +57,10 @@ let chekiLyricPos = 0;
 let mvContentToken = 0;
 // 現在表示中の歌詞がどの動画のものかを記録（遷移後の重複再取得を防ぐ）
 let loadedLyricsVideoId = '';
+// 歌詞の読み込みが進行中の動画（同じ動画の二重読み込みを防ぐ）
+let ytiLoadingVideoId = '';
+// 今の外部歌詞に当てている「曲の時計 → 動画の時計」（応援法・パート分けの時刻変換にも使う）
+let ytiCurrentWarp = null;
 // ===== 外部歌詞（LRCLIB）フォールバック =====
 // 字幕がない/自動生成しかない動画で、LRCLIBの同期歌詞（LRC）を代わりに表示する。
 // LRCは原曲基準の時計なので、MVのイントロ・間奏映像パートで生じるズレを
@@ -74,7 +91,12 @@ window.addEventListener('YTI_CaptionData', (e) => {
   try {
     const d = JSON.parse(e.detail);
     if (!d || !d.videoId || !d.text) return;
-    if (!ytiLyricsCache[d.videoId]) ytiLyricsCache[d.videoId] = {};
+    if (!ytiLyricsCache[d.videoId]) {
+      ytiLyricsCache[d.videoId] = {};
+      // ページ側のキャッシュと同じく、新しい順に20本だけ残す
+      const ids = Object.keys(ytiLyricsCache);
+      for (let i = 0; i < ids.length - 20; i++) delete ytiLyricsCache[ids[i]];
+    }
     ytiLyricsCache[d.videoId][d.key || '__default__'] = {
       text: d.text,
       lang: d.lang || '',
@@ -173,32 +195,58 @@ async function onNavigate() {
     return;
   }
   if (rootContainer && sessionStorage.getItem('mv_mode_active') === 'true') {
+    // 遷移した瞬間にキャッシュを描く。ここで出しておけば、この後の待機と
+    // 字幕トラック取得の時間が体感ゼロになる。無ければ従来どおりLoading表示。
     const lyricsArea = document.getElementById('mv-lyrics-area');
-    if (lyricsArea) lyricsArea.innerHTML = '<p style="opacity:0.5; font-size: 24px; padding: 40px;">Loading next track...</p>';
-    const titleEl = document.getElementById('mv-song-title');
-    if (titleEl) titleEl.innerText = "Loading...";
-    const artistEl = document.getElementById('mv-artist-name');
-    if (artistEl) artistEl.innerText = "";
-    await new Promise(r => setTimeout(r, 1000));
+    if (!showLyricsFromCache(getVideoId())) {
+      if (lyricsArea) lyricsArea.innerHTML = '<p style="opacity:0.5; font-size: 24px; padding: 40px;">Loading next track...</p>';
+    }
+    // 曲名はプレイヤーの情報から即座に出せる（取れなければ updateMetadataUI が再試行する）
+    try {
+      updateMetadataUI();
+    } catch (e) {}
+    await new Promise(r => setTimeout(r, 600));
     startMVMode(true, true);
   } else {
     init();
     if (sessionStorage.getItem('mv_mode_active') === 'true') {
       await new Promise(r => setTimeout(r, 1800));
       startMVMode(true);
+    } else if (pipWindow) {
+      // MVモードは閉じているが Mini Player が開いている場合。
+      // 曲が変わったら歌詞を出し直す（PiPは lyricsData を直接見ている）。
+      if (!showLyricsFromCache(getVideoId())) {
+        lyricsData = [];
+        lyricsRenderVersion++;
+      }
+      await new Promise(r => setTimeout(r, 800));
+      if (pipWindow) updateMVContent(0).catch(() => {});
     }
   }
 }
 
+let sidebarUpdateTimer = null;
+
+// サイドバー（次はこちら）は現在CSSで非表示にしている。非表示の間は関連動画の監視も
+// 組み立てもしない（YouTube側の書き換えのたびに20件を作り直す無駄を省く）。
+function isSidebarEnabled() {
+  const sb = document.getElementById('mv-sidebar');
+  return !!sb && getComputedStyle(sb).display !== 'none';
+}
+
 function startSidebarObserver() {
   if (sidebarObserver) sidebarObserver.disconnect();
+  sidebarObserver = null;
+  if (!rootContainer || !isSidebarEnabled()) return;
   const targetNode = document.querySelector('ytd-watch-next-secondary-results-renderer #items') || document.querySelector('#secondary #items');
   if (!targetNode) {
     setTimeout(startSidebarObserver, 2000);
     return;
   }
+  // 関連動画の欄は読み込み中に何十回も書き換わるので、落ち着いてから1回だけ組み直す
   sidebarObserver = new MutationObserver(() => {
-    updateSidebarContent(0);
+    clearTimeout(sidebarUpdateTimer);
+    sidebarUpdateTimer = setTimeout(() => updateSidebarContent(0), 600);
   });
   sidebarObserver.observe(targetNode, {
     childList: true
@@ -208,34 +256,103 @@ function startSidebarObserver() {
 
 function startButtonObserver() {
   if (buttonObserverTimer) clearInterval(buttonObserverTimer);
-  addMVButton();
-  buttonObserverTimer = setInterval(() => {
-    if (!document.querySelector('.ytp-mv-mode-button')) {
-      addMVButton();
-    }
-  }, 1500);
+  ensureControlButtons();
+  buttonObserverTimer = setInterval(ensureControlButtons, 1500);
 }
 
-function addMVButton() {
+// プレイヤー右下のボタン群のうち、拡張のボタンを置く場所。
+// 2025年以降のYouTube（.ytp-delhi-modern）は、右側の操作ボタンが高さ40pxの
+// ピル型の背景（.ytp-right-controls-left / -right の2グループ）に入っている。
+// 旧UIのつもりで .ytp-right-controls の先頭へ高さ48pxのボタンを差し込むと、
+// ピルの外にはみ出して上下にずれ、UIから浮いて見えていた。
+// 純正ボタンと同じグループの先頭に、同じ大きさのアイコンボタンとして置く。
+function getControlButtonHost() {
+  const player = document.getElementById('movie_player');
+  const scope = player || document;
+  return scope.querySelector('.ytp-right-controls-left') || scope.querySelector('.ytp-right-controls');
+}
+
+// 純正アイコンと同じく viewBox 24・線幅2の線画で描く
+const YTI_CTRL_ICON_MV = '<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="3"/><path d="M11 10h7M8 13.5h10M13 17h5"/></svg>';
+const YTI_CTRL_ICON_MINI = '<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="2.5" width="12" height="19" rx="2.5"/><path d="M6 10h12M9 14h6M9 17.5h4"/></svg>';
+
+function createControlButton(className, label, iconSvg, onClick) {
+  const btn = document.createElement('button');
+  btn.className = 'ytp-button ytp-yti-btn ' + className;
+  btn.title = label;
+  btn.setAttribute('aria-label', label);
+  btn.innerHTML = iconSvg;
+  btn.onclick = (e) => {
+    e.stopPropagation();
+    e.preventDefault();
+    onClick();
+  };
+  return btn;
+}
+
+// [MVモード][Mini Player] の順でグループの先頭に置く。
+// YouTubeはプレイヤーの組み直しでボタン群を作り直すことがあるので、
+// 1.5秒ごとに「正しい場所にあるか」だけを確かめ、外れていたら置き直す。
+function ensureControlButtons() {
   try {
-    const controlBar = document.querySelector('.ytp-right-controls');
-    if (!controlBar) return;
-    if (!document.querySelector('.ytp-mv-mode-button')) {
-      const btn = document.createElement('div');
-      btn.className = 'ytp-button ytp-mv-mode-button';
-      btn.innerText = 'MVモード';
-      btn.style.textAlign = 'center';
-      btn.style.width = 'auto';
-      btn.style.cursor = 'pointer';
-      btn.onclick = (e) => {
-        e.stopPropagation();
-        e.preventDefault();
-        startMVMode(false);
-      };
-      controlBar.insertBefore(btn, controlBar.firstChild);
+    const host = getControlButtonHost();
+    if (!host) return;
+    let mvBtn = document.querySelector('.ytp-mv-mode-button');
+    if (!mvBtn) {
+      mvBtn = createControlButton('ytp-mv-mode-button', 'MVモード', YTI_CTRL_ICON_MV, () => startMVMode(false));
     }
+    let miniBtn = document.querySelector('.ytp-yti-mini-button');
+    if (!miniBtn) {
+      // requestWindow はユーザー操作の直後でないと拒否されるので、
+      // 歌詞の読み込みより先に、awaitを挟まずPiPを開く。
+      miniBtn = createControlButton('ytp-yti-mini-button', 'Mini Player（歌詞つき）', YTI_CTRL_ICON_MINI, startMiniPlayerStandalone);
+    }
+    if (mvBtn.parentNode !== host || host.firstChild !== mvBtn) host.insertBefore(mvBtn, host.firstChild);
+    if (miniBtn.parentNode !== host || mvBtn.nextSibling !== miniBtn) host.insertBefore(miniBtn, mvBtn.nextSibling);
   } catch (e) {}
 }
+
+// MVモードを起動していない状態から Mini Player を開く。
+// 再生中のvideo要素を掴んで歌詞の読み込みを走らせるところまでを面倒みる。
+function startMiniPlayerStandalone() {
+  if (!isWatchPage()) {
+    showToast('動画の再生ページで使ってください');
+    return;
+  }
+  if (pipWindow) {
+    pipWindow.close();
+    return;
+  }
+  const video =
+    document.querySelector('#movie_player .video-stream.html5-main-video') ||
+    document.querySelector('.video-stream.html5-main-video') ||
+    document.querySelector('video');
+  if (!video) {
+    showToast('動画が見つかりませんでした');
+    return;
+  }
+  targetVideo = video;
+  try {
+    if (!video.getAttribute('crossOrigin')) video.setAttribute('crossOrigin', 'anonymous');
+  } catch (e) {}
+  // ここで await しないのが肝心（ユーザー操作の権限を失わないため）
+  enableMiniPlayerPiP();
+  // 歌詞はPiPを開いた後に裏で用意する。
+  // updateMVContent がキャッシュ→通常取得の順に面倒をみるので、
+  // 既にこの動画の歌詞を持っている時だけ何もしない。
+  const videoId = getVideoId();
+  const alreadyLoaded = !!videoId && loadedLyricsVideoId === videoId && lyricsData.length > 0;
+  if (!alreadyLoaded) {
+    lyricsData = [];
+    lyricsRenderVersion++;
+    try {
+      updateMVContent(0).catch(() => {});
+    } catch (e) {}
+  }
+}
+
+let settingsOutsideClickHandler = null;
+
 async function startMVMode(isAuto = false, isHotSwap = false) {
   if (rootContainer && !isHotSwap) return;
   // watchページ以外では起動しない（ホームのプレビュー動画などを掴まないように）
@@ -368,11 +485,19 @@ async function startMVMode(isAuto = false, isHotSwap = false) {
                 font-feature-settings: "palt";
                 letter-spacing: 0.02em;
                 white-space: pre-wrap;
-                word-break: break-all;
+                /* 英単語を途中で切らず、日本語は文節の切れ目で折る */
+                word-break: auto-phrase;
+                line-break: strict;
                 overflow-wrap: break-word;
+                text-wrap: pretty;
                 max-width: 100%;
 
-                transition: all 0.6s cubic-bezier(0.16, 1, 0.3, 1);
+                /* transition: all は全プロパティを監視するぶんスタイル再計算が重い。
+                   実際に変化するのは色・ぼかし・光彩・拡大のみなので明示する。 */
+                transition: color 0.6s cubic-bezier(0.16, 1, 0.3, 1),
+                            filter 0.6s cubic-bezier(0.16, 1, 0.3, 1),
+                            text-shadow 0.6s cubic-bezier(0.16, 1, 0.3, 1),
+                            transform 0.6s cubic-bezier(0.16, 1, 0.3, 1);
             }
 
             .lyric-line:hover {
@@ -408,7 +533,7 @@ async function startMVMode(isAuto = false, isHotSwap = false) {
             .mv-header-group.right { right: 30px; }
 
             .mv-header-group.right.active #mv-pin-btn { background: #ffffff !important; color: #000000 !important; border-color: transparent; box-shadow: 0 4px 12px rgba(0,0,0,0.2); text-shadow: none; }
-            .mv-header-group.right.active #mv-pin-btn svg { fill: #000000 !important; }
+            .mv-header-group.right.active #mv-pin-btn svg { stroke: #000000 !important; }
 
             #mv-root-container.no-lyrics-mode #mv-lyrics-area,
             #mv-root-container.no-lyrics-mode .rm-lyrics-container {
@@ -449,20 +574,22 @@ async function startMVMode(isAuto = false, isHotSwap = false) {
 <input type="range" id="mv-pos-slider" min="20" max="100" value="40" style="width: 80px; height: 4px; border-radius: 2px; -webkit-appearance: none; background: rgba(255,255,255,0.2); outline: none; cursor: pointer;">            </div>
 
             <div class="mv-header-group left">
-                <button id="mv-shot-btn" class="mv-glass-btn"><svg viewBox="0 0 24 24" style="width:17px;height:17px;margin-right:7px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg> Shot</button>
-                <button id="mv-desktop-btn" class="mv-glass-btn"><svg viewBox="0 0 24 24" style="width:17px;height:17px;margin-right:7px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg> Mini Player</button>
+                <button id="mv-shot-btn" class="mv-glass-btn"><svg viewBox="0 0 24 24"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg> Shot</button>
+                <button id="mv-desktop-btn" class="mv-glass-btn"><svg viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg> Mini Player</button>
             </div>
 
-            <div id="mv-glass-slider-container">
-                <input type="range" id="mv-glass-slider" min="0" max="100" value="50">
-            </div>
-            <button id="mv-glass-btn" class="mv-glass-btn"><svg viewBox="0 0 24 24" style="width:16px;height:16px;margin-right:6px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;"><rect x="3" y="3" width="18" height="18" rx="2" ry="2" opacity="0.4"/><rect x="7" y="7" width="10" height="10" rx="2" ry="2" opacity="0.7"/></svg> Glass</button>
-
+            <!-- 右上のボタンは1つのflex列に並べる。Glassとスライダーはレコードモード専用で、
+                 それ以外では display:none にして場所を取らない（以前は絶対座標で置いていたため、
+                 ボタン幅の合計が変わると Record / 固定ボタンと重なっていた） -->
             <div class="mv-header-group right">
-                <button id="mv-settings-btn" class="mv-glass-btn" title="表示オプション"><svg viewBox="0 0 24 24" style="width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
-                <button id="mv-record-btn" class="mv-glass-btn"><svg viewBox="0 0 24 24" style="width:17px;height:17px;margin-right:7px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3" fill="currentColor"/></svg> Record</button>
-                <button id="mv-pin-btn" class="mv-glass-btn"><svg viewBox="0 0 24 24" style="width:15px;height:15px;margin-right:6px;fill:currentColor;"><path d="M17 4v7l2 3v2h-6v5l-1 1-1-1v-5H5v-2l2-3V4c0-1.1.9-2 2-2h6c1.1 0 2 .9 2 2z"/></svg> 固定オフ</button>
-                <button id="mv-close-btn" class="mv-glass-btn"><svg viewBox="0 0 24 24" style="width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:2.5;stroke-linecap:round;"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+                <div id="mv-glass-slider-container">
+                    <input type="range" id="mv-glass-slider" min="0" max="100" value="50">
+                </div>
+                <button id="mv-glass-btn" class="mv-glass-btn"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2" ry="2" opacity="0.4"/><rect x="7" y="7" width="10" height="10" rx="2" ry="2" opacity="0.7"/></svg> Glass</button>
+                <button id="mv-settings-btn" class="mv-glass-btn" title="表示オプション"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
+                <button id="mv-record-btn" class="mv-glass-btn"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3" class="mv-ico-solid"/></svg> Record</button>
+                <button id="mv-pin-btn" class="mv-glass-btn"><svg viewBox="0 0 24 24"><path d="M9 3h6M10 3v6l-3 4h10l-3-4V3M12 13v8"/></svg> 固定オフ</button>
+                <button id="mv-close-btn" class="mv-glass-btn"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
             </div>
 
             <div class="record-mode-layout">
@@ -483,19 +610,6 @@ async function startMVMode(isAuto = false, isHotSwap = false) {
                             <div class="arm-pipe"> <div class="arm-weight"></div> <div class="arm-headshell"></div> </div>
                         </div>
                     </div>
-                </div>
-            </div>
-
-            <img id="mv-ambient-background" src="" alt="">
-
-            <div id="mv-ambient-controls">
-                <div class="amb-toggle-wrapper" id="amb-toggle-btn">
-                    <span class="amb-label">Ambient</span>
-                    <div class="amb-switch"></div>
-                </div>
-                <div class="amb-slider-container">
-                    <svg class="amb-icon" viewBox="0 0 24 24"><path d="M20 15.31L23.31 12 20 8.69V4h-4.69L12 0.69 8.69 4H4v4.69L0.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69zM12 18c-3.31 0-6-2.69-6-6s2.69-6 6-6 6 2.69 6 6-2.69 6-6 6z"/></svg>
-                    <input type="range" id="amb-brightness-slider" min="10" max="150" value="50">
                 </div>
             </div>
 
@@ -529,7 +643,7 @@ async function startMVMode(isAuto = false, isHotSwap = false) {
     const desktopBtn = overlayContent.querySelector('#mv-desktop-btn');
     if (desktopBtn) desktopBtn.onclick = (e) => {
       e.stopPropagation();
-      enableIpodPiP();
+      enableMiniPlayerPiP();
     };
     const settingsBtn = overlayContent.querySelector('#mv-settings-btn');
     if (settingsBtn) {
@@ -537,13 +651,18 @@ async function startMVMode(isAuto = false, isHotSwap = false) {
       overlayContent.appendChild(panel);
       settingsBtn.onclick = (e) => {
         e.stopPropagation();
+        if (panel.syncLetterboxToggles) panel.syncLetterboxToggles();
         panel.classList.toggle('open');
       };
-      document.addEventListener('click', (ev) => {
+      // パネルの外をクリックしたら閉じる。MVモードを開くたびに足していくと
+      // 閉じても外れずに溜まり続けるので、1つだけ持って終了時に外す。
+      if (settingsOutsideClickHandler) document.removeEventListener('click', settingsOutsideClickHandler);
+      settingsOutsideClickHandler = (ev) => {
         if (!panel.classList.contains('open')) return;
         if (ev.target.closest('#mv-settings-panel') || ev.target.closest('#mv-settings-btn')) return;
         panel.classList.remove('open');
-      });
+      };
+      document.addEventListener('click', settingsOutsideClickHandler);
     }
     const glassBtn = overlayContent.querySelector('#mv-glass-btn');
     const glassSlider = overlayContent.querySelector('#mv-glass-slider');
@@ -598,7 +717,7 @@ async function startMVMode(isAuto = false, isHotSwap = false) {
     const pinBtn = overlayContent.querySelector('#mv-pin-btn');
     if (pinBtn) {
       if (isInfoPinned) {
-        pinBtn.innerHTML = '<svg viewBox="0 0 24 24" style="width:15px;height:15px;margin-right:6px;fill:currentColor;"><path d="M17 4v7l2 3v2h-6v5l-1 1-1-1v-5H5v-2l2-3V4c0-1.1.9-2 2-2h6c1.1 0 2 .9 2 2z"/><path d="M9 4h6v7.17l1.5 2.25V14h-9v-.58l1.5-2.25V4z" fill="currentColor"/></svg> 固定オン';
+        pinBtn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M9 3h6M10 3v6l-3 4h10l-3-4V3M12 13v8"/></svg> 固定オン';
         pinBtn.classList.add('active-pin');
         setTimeout(() => document.getElementById('mv-info-area')?.classList.add('visible'), 100);
       }
@@ -609,12 +728,12 @@ async function startMVMode(isAuto = false, isHotSwap = false) {
         const parentGroup = pinBtn.closest('.mv-header-group');
         pinBtn.classList.remove('active-pin');
         if (isInfoPinned) {
-          pinBtn.innerHTML = '<svg viewBox="0 0 24 24" style="width:15px;height:15px;margin-right:6px;fill:currentColor;"><path d="M16,12V4H17V2H7V4H8V12L6,14V16H11V22H13V16H18V14L16,12Z"/></svg> 固定オン';
+          pinBtn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M9 3h6M10 3v6l-3 4h10l-3-4V3M12 13v8"/></svg> 固定オン';
           if (parentGroup) parentGroup.classList.add('active');
           document.getElementById('mv-info-area')?.classList.add('visible');
           showToast("コントローラーを固定しました");
         } else {
-          pinBtn.innerHTML = '<svg viewBox="0 0 24 24" style="width:15px;height:15px;margin-right:6px;fill:currentColor;"><path d="M17 4v7l2 3v2h-6v5l-1 1-1-1v-5H5v-2l2-3V4c0-1.1.9-2 2-2h6c1.1 0 2 .9 2 2z"/></svg> 固定オフ';
+          pinBtn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M9 3h6M10 3v6l-3 4h10l-3-4V3M12 13v8"/></svg> 固定オフ';
           if (parentGroup) parentGroup.classList.remove('active');
           showToast("固定を解除しました");
         }
@@ -649,7 +768,6 @@ async function startMVMode(isAuto = false, isHotSwap = false) {
             </div>
         `;
     rootContainer.prepend(bgImg);
-    rootContainer.appendChild(overlayContent);
     rootContainer.appendChild(controlsDiv);
     rootContainer.appendChild(overlayContent);
     setTimeout(() => {
@@ -695,13 +813,22 @@ async function startMVMode(isAuto = false, isHotSwap = false) {
         };
       }
     }, 100);
+    // 入場中は操作UI・曲名を出さない（yti-entering）。全画面への遷移と同時に
+    // すりガラス(backdrop-filter)のボタン十数個をフェードインさせていたのが
+    // カクつきの一因だったため、遷移が落ち着いてから1枚のレイヤーとして出す。
+    if (!isHotSwap) rootContainer.classList.add('yti-entering');
     document.body.appendChild(rootContainer);
+    // 広告・一時停止の確認・再生の操作の見張り（player_guard.js）
+    if (typeof ytiStartGuard === 'function') {
+      try {
+        ytiStartGuard();
+      } catch (e) {}
+    }
     updateUiScale();
     document.addEventListener('fullscreenchange', onFullscreenChange);
     document.addEventListener('mousemove', onUserAction);
     document.addEventListener('click', onUserAction);
     window.addEventListener('resize', updateUiScale);
-    onUserAction();
   }
   if (!rootContainer.contains(targetVideo)) {
     rootContainer.insertBefore(targetVideo, rootContainer.firstChild);
@@ -718,21 +845,95 @@ async function startMVMode(isAuto = false, isHotSwap = false) {
   targetVideo.addEventListener('play', playStatus);
   targetVideo.removeEventListener('pause', pauseStatus);
   targetVideo.addEventListener('pause', pauseStatus);
-  if (!isAuto && !isHotSwap) {
-    rootContainer.requestFullscreen().catch(() => {});
-  }
+  const goingFullscreen = !isAuto && !isHotSwap;
+  const fsRequest = goingFullscreen ? rootContainer.requestFullscreen().catch(() => false) : null;
+  // 黒帯カット（letterbox.js）に、動画がMVモードへ移ったことを知らせる
   try {
-    updateMetadataUI();
-    updateMVContent().catch(() => {});
+    ytiLetterboxRefresh();
   } catch (e) {}
-  startSidebarObserver();
-  const lyricsArea = document.getElementById('mv-lyrics-area');
-  if (lyricsArea) startSmoothAutoScroll(lyricsArea);
-  // タイトル常時表示オプションが有効なら、起動時から曲名を表示する
-  if (isTitleAlwaysOn) {
-    setTimeout(() => document.getElementById('mv-info-area')?.classList.add('visible'), 150);
-  }
+  // 字幕取得・歌詞DOMの生成・サイドバー監視・曲名の採寸は重い。
+  // 全画面への遷移アニメーションと同じタイミングで走らせるとカクつくため、
+  // 遷移が終わってから（まだUIを隠したまま）実行し、その後でUIを出す。
+  const startHeavyInit = () => {
+    if (!rootContainer) return;
+    try {
+      updateMetadataUI();
+    } catch (e) {}
+    try {
+      updateMVContent().catch(() => {});
+    } catch (e) {}
+    try {
+      startSidebarObserver();
+    } catch (e) {}
+    const lyricsArea = document.getElementById('mv-lyrics-area');
+    if (lyricsArea) startSmoothAutoScroll(lyricsArea);
+    if (isHotSwap) return;
+    // 重い処理で生じたスタイル再計算を描画し終えてからUIを出す
+    requestAnimationFrame(() => requestAnimationFrame(() => revealMvUi()));
+  };
+  runAfterEntrySettled(startHeavyInit, fsRequest);
   if (targetVideo.paused) targetVideo.play();
+}
+
+// 入場中に隠していた曲名・操作ボタンを出す。
+function revealMvUi() {
+  if (!rootContainer) return;
+  rootContainer.classList.remove('yti-entering');
+  // タイトル常時表示／固定オプションが有効なら曲名も出しておく
+  if (isTitleAlwaysOn || isInfoPinned) document.getElementById('mv-info-area')?.classList.add('visible');
+  onUserAction();
+}
+
+// 全画面への遷移が済み、ウィンドウサイズが落ち着いてから fn を実行する。
+// macOS の全画面アニメーションは0.5秒以上かかり、その間に resize が何度か来る。
+// 以前は400msで見切り発車していたため、アニメーションの途中で重い初期化が走っていた。
+// fsRequest: requestFullscreen() の Promise（全画面にしない時は null）
+function runAfterEntrySettled(fn, fsRequest) {
+  let done = false;
+  const run = () => {
+    if (done) return;
+    done = true;
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      try {
+        fn();
+      } catch (e) {}
+    }));
+  };
+  if (!fsRequest) {
+    run();
+    return;
+  }
+  let settleTimer = null;
+  let hardTimer = null;
+  const cleanup = () => {
+    document.removeEventListener('fullscreenchange', onFs);
+    window.removeEventListener('resize', onResize);
+    clearTimeout(settleTimer);
+    clearTimeout(hardTimer);
+  };
+  const finish = () => {
+    cleanup();
+    run();
+  };
+  // 最後の resize から150ms何も起きなければ「落ち着いた」とみなす
+  const armSettle = () => {
+    clearTimeout(settleTimer);
+    settleTimer = setTimeout(finish, 150);
+  };
+  const onResize = () => {
+    if (document.fullscreenElement) armSettle();
+  };
+  const onFs = () => {
+    if (document.fullscreenElement) armSettle();
+    else finish();
+  };
+  document.addEventListener('fullscreenchange', onFs);
+  window.addEventListener('resize', onResize);
+  // 全画面が拒否された時はすぐ、イベントが来ない環境でも1.5秒で必ず初期化する
+  fsRequest.then((r) => {
+    if (r === false) finish();
+  });
+  hardTimer = setTimeout(finish, 1500);
 }
 
 // モニター（画面解像度）に依存せず、UIが常に同じ体感サイズに見えるように
@@ -753,6 +954,8 @@ function updateUiScale() {
 function endMVMode(keepActive = false) {
   // 進行中の歌詞ロードを打ち切る（終了後もCCボタン等を操作し続けないように）
   mvContentToken++;
+  ytiUiShown = false;
+  activeLyricLine = null;
   if (idleTimer) {
     clearTimeout(idleTimer);
     idleTimer = null;
@@ -792,10 +995,26 @@ function endMVMode(keepActive = false) {
   document.removeEventListener('mousemove', onUserAction);
   document.removeEventListener('click', onUserAction);
   window.removeEventListener('resize', updateUiScale);
+  if (settingsOutsideClickHandler) {
+    document.removeEventListener('click', settingsOutsideClickHandler);
+    settingsOutsideClickHandler = null;
+  }
+  if (sidebarObserver) {
+    sidebarObserver.disconnect();
+    sidebarObserver = null;
+  }
+  clearTimeout(sidebarUpdateTimer);
+  karaokeClassApplied = null;
   if (!keepActive) {
     targetVideo = null;
     sessionStorage.removeItem('mv_mode_active');
   }
+  // Mini Player も開いていなければ、外部歌詞の音声同期はもう使わない
+  if (!pipWindow) ytiAudioSync.stop();
+  // 動画がプレイヤーへ戻ったので、黒帯カットを通常再生側の動作へ切り替える
+  try {
+    ytiLetterboxRefresh();
+  } catch (e) {}
 }
 let isLyricSelectionMode = false;
 
@@ -883,7 +1102,13 @@ function closeTranscriptPanel() {
   const closeBtn = document.querySelector('ytd-transcript-renderer button[aria-label="閉じる"], ytd-transcript-renderer button[aria-label="Close"]');
   if (closeBtn) closeBtn.click();
 }
-async function interceptFromCCButton() {
+// 字幕の取得のためにプレイヤーを操作する処理は、1本ずつ順に（player_guard.js の ytiPlayerMutex）。
+// 2本が同時に CC ボタンや字幕トラックを切り替えると、両方とも横取りに失敗する。
+function interceptFromCCButton() {
+  return ytiPlayerMutex.run('cc-button', ytiInterceptFromCCButtonRaw);
+}
+
+async function ytiInterceptFromCCButtonRaw() {
   return new Promise((resolve) => {
     let ccBtn = document.querySelector('.ytp-subtitles-button');
     let wasTurnedOn = false;
@@ -928,7 +1153,11 @@ async function interceptFromCCButton() {
     }
   });
 }
-async function scrapeTranscriptFromDOM() {
+function scrapeTranscriptFromDOM() {
+  return ytiPlayerMutex.run('transcript', ytiScrapeTranscriptFromDOMRaw);
+}
+
+async function ytiScrapeTranscriptFromDOMRaw() {
   return new Promise(async (resolve) => {
     const isOpened = openTranscriptPanel();
     if (!isOpened) {
@@ -1092,7 +1321,31 @@ function parseTimedTextXml(xmlText) {
   } catch (e) {}
   return segments;
 }
-const INTERLUDE_THRESHOLD = 12;
+// 行間がこの秒数以上空いたら「間奏」行（・・・）を挿入する。
+// ※定数は12だったが processRawLyricsToProcessed 側は 8.0 をハードコードしており、
+//   実際に効いていたのは 8.0。挙動を変えないよう 8 に合わせて一本化した。
+const INTERLUDE_THRESHOLD = 8.0;
+
+// 行ごとのボタン（コピー／同期）は数百行ぶん作るので、SVG文字列を毎回パースせず
+// 一度だけ組んだ雛形を複製する（歌詞の初回描画を軽くし、起動時のカクつきを抑える）
+const lyricButtonTemplates = {};
+
+function cloneLyricButtonTemplate(kind) {
+  if (!lyricButtonTemplates[kind]) {
+    const b = document.createElement('button');
+    if (kind === 'sync') {
+      b.className = 'lyric-quick-copy lyric-sync-tap';
+      b.title = 'この行を「今」に同期（この行以降のタイミングを合わせ直します）';
+      b.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="13" r="8"/><path d="M12 10v3l2 2"/><path d="M9 2h6"/></svg>';
+    } else {
+      b.className = 'lyric-quick-copy';
+      b.title = 'この行をコピー';
+      b.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
+    }
+    lyricButtonTemplates[kind] = b;
+  }
+  return lyricButtonTemplates[kind].cloneNode(true);
+}
 
 function renderLyricsDOM(lyricsArea) {
   if (!lyricsArea) return;
@@ -1100,6 +1353,10 @@ function renderLyricsDOM(lyricsArea) {
   lastActiveEl = null;
   cachedTargetScroll = null;
   lastLyricIndex = -1;
+  activeLyricLine = null;
+  lyricsRenderVersion++;
+  ytiLyricMotion.reset(lyricsArea);
+  lyricsNeedInstantScroll = true;
   const lyricsHeader = document.getElementById('mv-lyrics-header');
   const rmScroll = document.getElementById('rm-lyrics-scroll');
   lyricsArea.innerHTML = '';
@@ -1124,6 +1381,7 @@ function renderLyricsDOM(lyricsArea) {
       if (prevHasJapanese && timeDiff < 0.6) isOrphanRomaji = true;
     }
     const subLines = rawText.split(/\r\n|\n|\r/);
+    let tokenizedOnce = false;
     subLines.forEach((subText) => {
       if (!subText.trim()) return;
       if (line.isInstrumental) {
@@ -1147,11 +1405,22 @@ function renderLyricsDOM(lyricsArea) {
       const hasJapanese = subText.match(/[\u3040-\u309f\u30a0-\u30ff\u4e00-\u9faf\u3400-\u4dbf]/);
       const hasHangul = subText.match(/[\u1100-\u11FF\u3130-\u318F\uA960-\uA97F\uAC00-\uD7AF]/);
       if (hasHangul) textSpan.classList.add('type-native');
-      else if (hasJapanese) textSpan.classList.add('type-jp');
+      else if (hasJapanese) {
+        textSpan.classList.add('type-jp');
+        // auto-phrase（文節での折り返し）は言語が分かって初めて効く
+        textSpan.lang = 'ja';
+      }
       else textSpan.classList.add((segmentHasJapanese && !hasJapanese) || isOrphanRomaji ? 'type-romaji' : 'type-eng');
+      // カラオケの語単位の塗り（karaoke_words.js）。行の最初の本文だけを語に分ける
+      const tokenized = !tokenizedOnce && typeof ytiTokenizeLine === 'function' &&
+        ytiTokenizeLine(line, textSpan, subText, lyricsData[index + 1]);
+      if (tokenized) tokenizedOnce = true;
+      // 韓国語の読み（korean_ruby.js）。表示の入り切りは <html> のクラスで行う（語に分けた時は語ごとに付け済み）
+      if (hasHangul && !tokenized) ytiKoreanRuby.decorate(textSpan);
       container.appendChild(textSpan);
       const rmSpan = document.createElement('span');
       rmSpan.innerText = subText;
+      if (hasHangul) ytiKoreanRuby.decorate(rmSpan);
       if (textSpan.classList.contains('type-native')) rmSpan.classList.add('type-native');
       if (textSpan.classList.contains('type-jp')) rmSpan.classList.add('type-jp');
       if (textSpan.classList.contains('type-romaji')) rmSpan.classList.add('type-romaji');
@@ -1172,13 +1441,21 @@ function renderLyricsDOM(lyricsArea) {
         rmLine.appendChild(rmSubSpan);
       });
     }
+    // ハモリ（背景の声）は本編の下に小さく
+    if (line.bg && line.bg.text && typeof ytiRenderBackgroundVocal === 'function') {
+      try {
+        ytiRenderBackgroundVocal(line, container);
+      } catch (e) {}
+    }
     line.el = container;
+    if (typeof ytiDecorateLineElement === 'function') {
+      try {
+        ytiDecorateLineElement(line, container, index);
+      } catch (e) {}
+    }
     // #1 クイックコピー：行ホバーで現れるボタンでその行の歌詞を即コピー（再生位置は動かさない）
     if (!line.isInstrumental) {
-      const quickCopyBtn = document.createElement('button');
-      quickCopyBtn.className = 'lyric-quick-copy';
-      quickCopyBtn.title = 'この行をコピー';
-      quickCopyBtn.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
+      const quickCopyBtn = cloneLyricButtonTemplate('copy');
       quickCopyBtn.onclick = (e) => {
         e.stopPropagation();
         let txt = (line.text || '');
@@ -1192,19 +1469,6 @@ function renderLyricsDOM(lyricsArea) {
         }).catch(() => {});
       };
       container.appendChild(quickCopyBtn);
-      // 外部歌詞モード：行ホバーの時計ボタンで「この行＝今」のアンカーを打つ。
-      // イントロや間奏の映像パートで生じたズレを、その行以降だけ合わせ直せる。
-      if (usingExternalLyrics && typeof line.baseTime === 'number') {
-        const syncBtn = document.createElement('button');
-        syncBtn.className = 'lyric-quick-copy lyric-sync-tap';
-        syncBtn.title = 'この行を「今」に同期（この行以降のタイミングを合わせ直します）';
-        syncBtn.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="13" r="8"/><path d="M12 10v3l2 2"/><path d="M9 2h6"/></svg>';
-        syncBtn.onclick = (e) => {
-          e.stopPropagation();
-          addLyricsAnchorForLine(line);
-        };
-        container.appendChild(syncBtn);
-      }
     }
     container.onclick = (e) => {
       if (isLyricSelectionMode) {
@@ -1230,11 +1494,16 @@ function renderLyricsDOM(lyricsArea) {
   if (rmScroll) {
     rmScroll.appendChild(rmFragment);
   }
+  // 外部歌詞モード：行ホバーの時計ボタンで「この行＝今」のアンカーを打つ。
+  // イントロや間奏の映像パートで生じたズレを、その行以降だけ合わせ直せる。
+  attachLyricSyncButtons();
 }
 
 function buildLyricsUIWithLanguageSwitch(lyricsArea, lyricsHeader) {
   if (!lyricsHeader) lyricsHeader = document.getElementById('mv-lyrics-header');
   if (!lyricsArea) lyricsArea = document.getElementById('mv-lyrics-area');
+  // MVモードを閉じたまま Mini Player だけ使っている時はヘッダーUIが存在しない
+  if (!lyricsHeader || !lyricsArea) return;
   lyricsHeader.innerHTML = '';
   const rootContainer = document.getElementById('mv-root-container');
   if (rootContainer) {
@@ -1274,7 +1543,7 @@ function buildLyricsUIWithLanguageSwitch(lyricsArea, lyricsHeader) {
     if (lyricsArea) lyricsArea.classList.remove('mode-jp-only', 'mode-native-only');
     if (rmScroll) rmScroll.classList.remove('mode-jp-only', 'mode-native-only');
     if (currentMode === 0) {
-      langBtn.innerHTML = '<svg viewBox="0 0 24 24" style="width:15px;height:15px;margin-right:5px;fill:none;stroke:currentColor;stroke-width:2;"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg> 全表示';
+      langBtn.innerHTML = '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg> 全表示';
       langBtn.style.background = '';
       langBtn.style.color = '';
       localStorage.setItem('mv_lyrics_mode', 'all');
@@ -1305,7 +1574,7 @@ function buildLyricsUIWithLanguageSwitch(lyricsArea, lyricsHeader) {
   lyricsHeader.appendChild(langBtn);
   const copyAllBtn = document.createElement('button');
   copyAllBtn.className = 'mv-lyric-action-btn';
-  copyAllBtn.innerHTML = '<svg viewBox="0 0 24 24" style="width:15px;height:15px;margin-right:5px;fill:none;stroke:currentColor;stroke-width:2;"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg> 全コピー';
+  copyAllBtn.innerHTML = '<svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg> 全コピー';
   copyAllBtn.onclick = () => {
     let targetText = [];
     lyricsData.forEach(l => {
@@ -1322,7 +1591,7 @@ function buildLyricsUIWithLanguageSwitch(lyricsArea, lyricsHeader) {
   lyricsHeader.appendChild(copyAllBtn);
   const selectBtn = document.createElement('button');
   selectBtn.className = 'mv-lyric-action-btn';
-  selectBtn.innerHTML = '<svg viewBox="0 0 24 24" style="width:15px;height:15px;margin-right:5px;fill:none;stroke:currentColor;stroke-width:2;"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg> 選択';
+  selectBtn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg> 選択';
   selectBtn.onclick = () => {
     isLyricSelectionMode = !isLyricSelectionMode;
     if (isLyricSelectionMode) {
@@ -1345,8 +1614,8 @@ function buildLyricsUIWithLanguageSwitch(lyricsArea, lyricsHeader) {
     } else {
       lyricsArea.classList.remove('selecting');
       lyricsArea.querySelectorAll('.lyric-line-container.selected').forEach(el => el.classList.remove('selected'));
-      selectBtn.innerHTML = '<svg viewBox="0 0 24 24" style="width:15px;height:15px;margin-right:5px;fill:none;stroke:currentColor;stroke-width:2;"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg> 選択';
-      copyAllBtn.innerHTML = '<svg viewBox="0 0 24 24" style="width:15px;height:15px;margin-right:5px;fill:none;stroke:currentColor;stroke-width:2;"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg> 全コピー';
+      selectBtn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg> 選択';
+      copyAllBtn.innerHTML = '<svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg> 全コピー';
       copyAllBtn.classList.remove('primary');
       copyAllBtn.onclick = () => {
         let targetText = [];
@@ -1367,8 +1636,68 @@ function buildLyricsUIWithLanguageSwitch(lyricsArea, lyricsHeader) {
   renderLyricsDOM(lyricsArea);
 }
 
+// 歌詞でない行（クレジット・曲名の表示・記号だけの行）の判定。
+// 公式字幕の冒頭の「作詞：〜 作曲：〜」「『曲名』」「♪」や、歌詞DBの「作词 : 〜」などが、
+// 前奏の間に「歌詞」として表示されてしまうのを防ぐ。
+const YTI_CREDIT_RE = /(作詞|作曲|編曲|作词|编曲|詞|词|Lyrics?|Lyricist|Words|Music|Composed|Composer|Arrange[dr]?|Arrangement|Produced|Producer|Prod\.|Vocals?|Director|監督|振付|Choreograph\w*|Mix(?:ed|ing)?|Master(?:ed|ing)?)\s*(?:by)?\s*[:：／/]/i;
+// 「制作人 : 〜」「和声 : 〜」のような、短い漢字・かなの見出し＋コロン
+const YTI_CJK_LABEL_RE = /^[\u4e00-\u9fff\u3040-\u30ff]{1,8}\s*[:：]/;
+
+function isNonLyricLine(text, titles, artist) {
+  const t = String(text || '').trim();
+  const norm = yti_normalizeForMatch(t);
+  if (!norm) return true; // 空・記号だけ（♪ など）
+  if (YTI_CREDIT_RE.test(t) || YTI_CJK_LABEL_RE.test(t)) return true;
+  if (/著作权|版权|纯音乐|请欣赏|請欣賞/.test(t)) return true;
+  if (/^(lyrics|words|music|composed|arranged|produced|written)\s+(and\s+\w+\s+)?by\b/i.test(t)) return true;
+  if (/^(official\s*)?(music\s*video|mv|lyric\s*video)$/i.test(t)) return true;
+  // 曲名の表示（『曲名』、曲名 - アーティスト 等）。サビで曲名を歌う行は消さないよう、
+  // 括弧・区切り・アーティスト名が一緒に書かれている時だけ非歌詞とみなす。
+  const na = yti_normalizeForMatch(artist || '');
+  for (const title of titles) {
+    const nt = yti_normalizeForMatch(title || '');
+    if (nt.length < 2 || !norm.includes(nt)) continue;
+    if (/[『「【\[]|\s[-–—/|]\s|feat\.|\bMV\b|Music Video/i.test(t)) return true;
+    if (na.length >= 2 && norm.includes(na)) return true;
+  }
+  return false;
+}
+
+// 先頭と末尾にある歌詞でない行を取り除く（曲の途中の行には手を付けない）
+function stripNonLyricLines(raw) {
+  if (!raw || raw.length < 3) return raw;
+  let meta = { title: '', artist: '' };
+  try {
+    meta = getDisplayMetadata();
+  } catch (e) {}
+  const titles = [meta.title];
+  if (externalLyricsInfo && externalLyricsInfo.trackName) titles.push(externalLyricsInfo.trackName);
+  const artist = meta.artist || (externalLyricsInfo && externalLyricsInfo.artistName) || '';
+  let startIdx = 0;
+  while (startIdx < raw.length - 2 && startIdx < 8 && (raw[startIdx].time || 0) < 45 &&
+         isNonLyricLine(raw[startIdx].text, titles, artist)) startIdx++;
+  let endIdx = raw.length;
+  while (endIdx - 1 > startIdx + 1 && raw.length - endIdx < 4 && isNonLyricLine(raw[endIdx - 1].text, titles, artist)) endIdx--;
+  return (startIdx === 0 && endIdx === raw.length) ? raw : raw.slice(startIdx, endIdx);
+}
+
+// 歌い出しまでがこれ以上あれば、先頭に前奏の「・・・」行を置く（Apple Music と同じく、
+// 前奏の間は歌詞の1行目ではなく前奏表示に焦点を当てる）
+const INTRO_DOTS_MIN = 6;
+
 function processRawLyricsToProcessed(rawLyrics) {
+  rawLyrics = stripNonLyricLines(rawLyrics);
   const processed = [];
+  if (rawLyrics.length && rawLyrics[0].time >= INTRO_DOTS_MIN) {
+    processed.push({
+      time: 0,
+      duration: rawLyrics[0].time - 1.0,
+      text: "・・・",
+      isInstrumental: true,
+      isIntro: true,
+      el: null
+    });
+  }
   for (let i = 0; i < rawLyrics.length; i++) {
     const currentLine = rawLyrics[i];
     processed.push(currentLine);
@@ -1376,7 +1705,7 @@ function processRawLyricsToProcessed(rawLyrics) {
       const nextLine = rawLyrics[i + 1];
       const endTime = currentLine.duration ? (currentLine.time + currentLine.duration) : (currentLine.time + 4.0);
       const trueGap = nextLine.time - endTime;
-      if (trueGap >= 8.0) {
+      if (trueGap >= INTERLUDE_THRESHOLD) {
         processed.push({
           time: endTime + 0.5,
           duration: trueGap - 1.0,
@@ -1390,40 +1719,237 @@ function processRawLyricsToProcessed(rawLyrics) {
   return processed;
 }
 
+// ===== 歌詞の永続キャッシュ（localStorage） =====
+// 一度取得した歌詞を動画IDごとに保存し、次に同じ曲を開いた時は通信を待たずに
+// 即座に表示する。表示後も通常の取得処理は裏で走らせ、内容が変わっていた時だけ
+// 差し替える（＝キャッシュは常に「速く出すための下書き」）。
+const YTI_LYR_CACHE_PREFIX = 'yti_lyrcache_';
+const YTI_LYR_CACHE_INDEX = 'yti_lyrcache_index';
+const YTI_LYR_CACHE_MAX = 40;
+// キャッシュから先に描いた歌詞の動画IDと指紋。取得完了時にこれと同じ内容なら
+// 描き直さない（＝スクロール位置やハイライトが一瞬リセットされるチラつきを防ぐ）。
+// リトライで updateMVContent が呼び直されても保持できるようモジュール変数に置く。
+let cacheShownVideoId = '';
+let cacheShownSig = '';
+// 歌詞の探索が「終わった」動画ID。見つかった／見つからなかったの両方で立てる。
+// Mini Player 側が「読み込み中…」と「歌詞がありません」を出し分けるのに使う。
+let lyricsLoadDoneVideoId = '';
+
+// 内容が変わったかを軽く判定するための指紋。行数・総文字数・先頭末尾で十分。
+function lyricsSignature(lines) {
+  if (!lines || !lines.length) return '';
+  let chars = 0;
+  for (const l of lines) chars += (l.text || '').length + (l.subText || '').length;
+  const first = lines[0];
+  const last = lines[lines.length - 1];
+  return `${lines.length}:${chars}:${(first.text || '').slice(0, 24)}:${(last.text || '').slice(0, 24)}`;
+}
+
+function readLyricsCacheIndex() {
+  try {
+    const raw = localStorage.getItem(YTI_LYR_CACHE_INDEX);
+    const arr = raw ? JSON.parse(raw) : [];
+    return Array.isArray(arr) ? arr : [];
+  } catch (e) {
+    return [];
+  }
+}
+
+// 直近利用順（先頭が最新）に並べ替え、上限を超えた分は実体ごと捨てる
+function touchLyricsCacheIndex(videoId) {
+  let idx = readLyricsCacheIndex().filter(v => v !== videoId);
+  idx.unshift(videoId);
+  const dropped = idx.slice(YTI_LYR_CACHE_MAX);
+  idx = idx.slice(0, YTI_LYR_CACHE_MAX);
+  dropped.forEach(v => {
+    try {
+      localStorage.removeItem(YTI_LYR_CACHE_PREFIX + v);
+    } catch (e) {}
+  });
+  try {
+    localStorage.setItem(YTI_LYR_CACHE_INDEX, JSON.stringify(idx));
+  } catch (e) {}
+  return dropped;
+}
+
+// キャッシュ由来の歌詞を今まさに表示中か（取得失敗時に消してしまわないための判定）
+function isShowingCachedLyrics(videoId) {
+  return !!videoId && cacheShownVideoId === videoId && lyricsData.length > 0;
+}
+
+// キャッシュにある歌詞を今すぐ画面へ出す。取得処理より前に呼ぶのが肝心で、
+// 曲送りの待ち時間（onNavigateの待機＋字幕トラック取得）を丸ごと飛ばせる。
+function showLyricsFromCache(videoId) {
+  if (!videoId) return false;
+  if (isShowingCachedLyrics(videoId)) return true; // 二重描画しない
+  const cached = loadLyricsFromCache(videoId);
+  if (!cached) {
+    console.debug('[YT Immersion] lyrics cache: MISS', videoId);
+    return false;
+  }
+  lyricsData = cached.lines;
+  cacheShownVideoId = videoId;
+  cacheShownSig = lyricsSignature(lyricsData);
+  const lyricsArea = document.getElementById('mv-lyrics-area');
+  if (lyricsArea) {
+    lyricsArea.classList.remove('no-lyrics', 'fade-out');
+    renderLyricsDOM(lyricsArea);
+  } else {
+    lyricsRenderVersion++;
+  }
+  try {
+    syncLyrics();
+  } catch (e) {}
+  console.debug('[YT Immersion] lyrics cache: HIT', videoId, cached.lines.length + '行');
+  return true;
+}
+
+function saveLyricsToCache(videoId, lines, meta) {
+  if (!videoId || !lines || !lines.length) return;
+  const payload = {
+    v: 1,
+    at: Date.now(),
+    lang: (meta && meta.lang) || '',
+    subLang: (meta && meta.subLang) || '',
+    external: !!(meta && meta.external),
+    lines: lines.map(l => {
+      const o = { t: Math.round((l.time || 0) * 1000) / 1000, x: l.text || '' };
+      if (l.duration) o.d = Math.round(l.duration * 1000) / 1000;
+      if (l.subText) o.s = l.subText;
+      if (l.isInstrumental) o.i = 1;
+      return o;
+    })
+  };
+  const body = JSON.stringify(payload);
+  const write = () => localStorage.setItem(YTI_LYR_CACHE_PREFIX + videoId, body);
+  try {
+    write();
+  } catch (e) {
+    // 容量超過：古いものから半分捨てて一度だけ再試行する
+    try {
+      const idx = readLyricsCacheIndex();
+      const keep = Math.floor(idx.length / 2);
+      idx.slice(keep).forEach(v => localStorage.removeItem(YTI_LYR_CACHE_PREFIX + v));
+      localStorage.setItem(YTI_LYR_CACHE_INDEX, JSON.stringify(idx.slice(0, keep)));
+      write();
+    } catch (e2) {
+      console.warn('[YT Immersion] lyrics cache: SAVE FAILED (localStorage容量?)', videoId, e2 && e2.name);
+      return;
+    }
+  }
+  touchLyricsCacheIndex(videoId);
+  console.debug('[YT Immersion] lyrics cache: SAVE', videoId, lines.length + '行', Math.round(body.length / 1024) + 'KB');
+}
+
+function loadLyricsFromCache(videoId) {
+  if (!videoId) return null;
+  let payload = null;
+  try {
+    const raw = localStorage.getItem(YTI_LYR_CACHE_PREFIX + videoId);
+    if (!raw) return null;
+    payload = JSON.parse(raw);
+  } catch (e) {
+    return null;
+  }
+  if (!payload || payload.v !== 1 || !Array.isArray(payload.lines) || !payload.lines.length) return null;
+  const lines = payload.lines.map(o => {
+    const line = { time: o.t || 0, text: o.x || '', el: null };
+    if (o.d) line.duration = o.d;
+    if (o.s) line.subText = o.s;
+    if (o.i) line.isInstrumental = true;
+    return line;
+  });
+  touchLyricsCacheIndex(videoId);
+  return { lines, meta: payload };
+}
+
 function mergeDualLyrics(mainRaw, subRaw) {
   if (!subRaw || subRaw.length === 0) return processRawLyricsToProcessed(mainRaw);
   const processedMain = processRawLyricsToProcessed(mainRaw);
-  processedMain.forEach(mainLine => {
-    if (mainLine.isInstrumental) return;
-    const match = subRaw.find(sub => Math.abs(sub.time - mainLine.time) < 1.5);
-    if (match && match.text.trim() !== mainLine.text.trim()) {
-      mainLine.subText = match.text;
-    }
+  // 時間の重なりで順序を保って組み合わせる（core/pairing.js）。割れた訳はつなぐ。
+  const real = processedMain.filter(l => !l.isInstrumental);
+  const toRow = (l) => ({ start: l.time, end: l.duration ? l.time + l.duration : undefined, text: l.text });
+  const paired = YTICore.pairing.pairLines(real.map(toRow), subRaw.map(toRow));
+  real.forEach((line, i) => {
+    const t = paired[i];
+    if (t && t.trim() !== line.text.trim()) line.subText = t;
   });
   return processedMain;
 }
 
+// プレイヤーから再生中の動画の基本情報を同期的に読む（page_script.js のブリッジ）。
+// CustomEvent の dispatch は同期実行なので、戻った時点で応答が届いている。
+function getPlayerVideoData() {
+  let out = null;
+  const handler = (e) => {
+    try {
+      out = JSON.parse(e.detail);
+    } catch (_) {}
+  };
+  window.addEventListener('YTI_VideoDataResponse', handler);
+  try {
+    window.dispatchEvent(new CustomEvent('YTI_RequestVideoData'));
+  } catch (_) {}
+  window.removeEventListener('YTI_VideoDataResponse', handler);
+  return out;
+}
+
+// チャンネル名から「OFFICIAL YouTube CHANNEL」「公式チャンネル」「VEVO」「- Topic」などの
+// 飾りを取り除いてアーティスト名にする。末尾から1語ずつ剥がすので、
+// 「乃木坂46 OFFICIAL YouTube CHANNEL」→「乃木坂46」のような複合形にも効く。
+// 英語の語は区切り（空白・記号）の直後にある時だけ剥がす（「Rich」の ch などを壊さない）。
+function cleanArtistName(name) {
+  const original = String(name || '').trim();
+  let s = original.replace(/^[【\[(（]\s*(?:公式|official)\s*[】\])）]\s*/i, '');
+  const tails = [
+    /(?:^|[\s\-_|/・:：]+)(?:official|offical|youtube|channel|ch\.?|topic)\s*$/i,
+    /(?:公式|オフィシャル|チャンネル|ちゃんねる)\s*$/,
+    /VEVO\s*$/
+  ];
+  for (let i = 0; i < 8; i++) {
+    let next = s;
+    for (const re of tails) next = next.replace(re, '');
+    next = next.replace(/[\s\-_|/・:：]+$/, '').trim();
+    if (next === s) break;
+    s = next;
+  }
+  return s || original;
+}
+
 function getCleanedMetadata() {
-  let rawTitle = document.querySelector('h1.ytd-video-primary-info-renderer')?.textContent.trim() || document.querySelector('#title h1')?.innerText || document.title.replace(' - YouTube', '') || "";
+  // SPA遷移の直後は、ページのタイトル要素が前の動画のまま残っている。
+  // ytd-watch-flexy の video-id で鮮度を確かめ、古ければプレイヤーの情報を使う
+  // （以前はここで古い曲名を掴むのを避けるため、取得完了まで曲名を消していた）。
+  const vid = getVideoId();
+  const flexy = document.querySelector('ytd-watch-flexy');
+  const domFresh = !vid || !flexy || flexy.getAttribute('video-id') === vid;
+  const pd = getPlayerVideoData();
+  const pdFresh = !!(pd && pd.videoId && pd.videoId === vid);
+  let rawTitle = '';
+  if (pdFresh && pd.title) rawTitle = pd.title;
+  else if (domFresh) rawTitle = document.querySelector('h1.ytd-video-primary-info-renderer')?.textContent.trim() || document.querySelector('#title h1')?.innerText || document.title.replace(' - YouTube', '') || "";
   let songTitle = rawTitle;
   let rawArtist = "";
-  const attributedLink = document.querySelector('#attributed-channel-name a');
-  if (attributedLink) {
-    rawArtist = attributedLink.textContent.trim();
-    rawArtist = rawArtist.replace(/、/g, ' & ').replace(/, /g, ' & ');
-  }
-  if (!rawArtist) {
-    const metaBlock = document.querySelector('ytd-watch-metadata #owner') || document.querySelector('ytd-video-owner-renderer');
-    if (metaBlock) {
-      const channelLinks = metaBlock.querySelectorAll('ytd-channel-name a:not([hidden])');
-      if (channelLinks.length > 0) {
-        rawArtist = Array.from(channelLinks).map(link => link.textContent.trim()).filter(text => text.length > 0).filter((text, index, self) => self.indexOf(text) === index).join(' & ');
+  if (domFresh) {
+    const attributedLink = document.querySelector('#attributed-channel-name a');
+    if (attributedLink) {
+      rawArtist = attributedLink.textContent.trim();
+      rawArtist = rawArtist.replace(/、/g, ' & ').replace(/, /g, ' & ');
+    }
+    if (!rawArtist) {
+      const metaBlock = document.querySelector('ytd-watch-metadata #owner') || document.querySelector('ytd-video-owner-renderer');
+      if (metaBlock) {
+        const channelLinks = metaBlock.querySelectorAll('ytd-channel-name a:not([hidden])');
+        if (channelLinks.length > 0) {
+          rawArtist = Array.from(channelLinks).map(link => link.textContent.trim()).filter(text => text.length > 0).filter((text, index, self) => self.indexOf(text) === index).join(' & ');
+        }
       }
     }
+    if (!rawArtist) {
+      rawArtist = document.querySelector('#owner-name a')?.innerText || "";
+    }
   }
-  if (!rawArtist) {
-    rawArtist = document.querySelector('#owner-name a')?.innerText || "";
-  }
+  if (!rawArtist && pdFresh) rawArtist = pd.author || '';
   const bracketMatch = rawTitle.match(/『(.*?)』/) || rawTitle.match(/「(.*?)」/) || rawTitle.match(/["'](.*?)["']/);
   let useBracketTitle = false;
   if (bracketMatch) {
@@ -1437,7 +1963,7 @@ function getCleanedMetadata() {
   }
   if (!useBracketTitle) {
     let tempTitle = rawTitle;
-    const artistParts = rawArtist.split('&').map(s => s.trim());
+    const artistParts = cleanArtistName(rawArtist).split('&').map(s => s.trim());
     artistParts.forEach(art => {
       if (art) tempTitle = tempTitle.replace(art, '');
     });
@@ -1447,20 +1973,150 @@ function getCleanedMetadata() {
       songTitle = quoteCleanup[1];
     }
   }
-  let artistName = rawArtist.replace(/Official\s*Channel/gi, '').replace(/Channel/gi, '').replace(/チャンネル/g, '').replace(/公式/g, '').trim();
+  const artistName = cleanArtistName(rawArtist);
   return {
     title: songTitle,
     artist: artistName
   };
 }
 
+// ===== 構造化楽曲メタデータ（MAIN世界から取得）=====
+// 動画タイトルは【MV】曲名 / アーティスト (Official Music Video) のような
+// 無法地帯なので、Content ID由来の正確な曲名・アーティストが取れるなら
+// そちらを外部歌詞DBの検索キーに使う。取れない動画も多いのでnull前提で扱う。
+const ytiMusicMetaCache = {};
+
+function requestMusicMetaOnce(videoId) {
+  return new Promise((resolve) => {
+    let done = false;
+    const handler = (e) => {
+      let d = null;
+      try {
+        d = JSON.parse(e.detail);
+      } catch (_) {}
+      if (!d || (d.videoId && videoId && d.videoId !== videoId)) return;
+      done = true;
+      window.removeEventListener('YTI_MusicMetaResponse', handler);
+      clearTimeout(timer);
+      resolve(d);
+    };
+    window.addEventListener('YTI_MusicMetaResponse', handler);
+    const timer = setTimeout(() => {
+      if (done) return;
+      window.removeEventListener('YTI_MusicMetaResponse', handler);
+      resolve(null);
+    }, 1500);
+    try {
+      window.dispatchEvent(new CustomEvent('YTI_RequestMusicMeta', { detail: videoId }));
+    } catch (_) {
+      resolve(null);
+    }
+  });
+}
+
+async function requestMusicMetaFromPage(videoId) {
+  if (!videoId) return null;
+  if (Object.prototype.hasOwnProperty.call(ytiMusicMetaCache, videoId)) {
+    return ytiMusicMetaCache[videoId];
+  }
+  // SPA遷移直後は ytInitialData が前ページのまま。stale が返る間は待って再試行する。
+  // ここで stale を null と同一視すると「楽曲メタ無し」として確定キャッシュしてしまう。
+  for (let i = 0; i < 3; i++) {
+    const d = await requestMusicMetaOnce(videoId);
+    if (d && !d.stale) {
+      ytiMusicMetaCache[videoId] = d.meta || null;
+      return d.meta || null;
+    }
+    if (i < 2) await new Promise(r => setTimeout(r, 600));
+  }
+  // 応答なし/stale のままなら、キャッシュせずに諦める（次の機会に再取得できる）
+  return null;
+}
+
+// 構造化データ優先、無ければ従来のタイトルパースにフォールバック。
+// 構造化側が来たかどうかは fromStructured で呼び出し側に伝える。
+async function getMusicMetadata(videoId) {
+  const dom = getCleanedMetadata();
+  let sm = null;
+  try {
+    sm = await requestMusicMetaFromPage(videoId);
+  } catch (e) {}
+  if (sm && sm.song) {
+    try {
+      console.info('[YT Immersion] 構造化楽曲メタ: ' + sm.song + ' / ' + (sm.artist || '(不明)'));
+    } catch (e) {}
+    return {
+      title: sm.song,
+      artist: sm.artist || dom.artist || '',
+      album: sm.album || '',
+      fromStructured: true,
+      domTitle: dom.title,
+      domArtist: dom.artist
+    };
+  }
+  return {
+    title: dom.title,
+    artist: dom.artist,
+    album: '',
+    fromStructured: false,
+    domTitle: dom.title,
+    domArtist: dom.artist
+  };
+}
+
+// 取得済みの構造化メタを同期的に読む（UIから使う）。未取得なら null。
+function getCachedMusicMeta(videoId) {
+  if (!videoId) return null;
+  return Object.prototype.hasOwnProperty.call(ytiMusicMetaCache, videoId) ? ytiMusicMetaCache[videoId] : null;
+}
+
+// 表示用の曲名・アーティスト。構造化メタがあればそちらが正確なので優先する。
+let musicMetaPrimingVideoId = '';
+
+function getDisplayMetadata() {
+  const vid = getVideoId();
+  const dom = getCleanedMetadata();
+  const sm = getCachedMusicMeta(vid);
+  // 未取得なら裏で取りに行き、届いたら描き直す（届かなければ何もしない＝再帰しない）
+  if (vid && !Object.prototype.hasOwnProperty.call(ytiMusicMetaCache, vid) && musicMetaPrimingVideoId !== vid) {
+    musicMetaPrimingVideoId = vid;
+    requestMusicMetaFromPage(vid).then(m => {
+      musicMetaPrimingVideoId = '';
+      if (m && m.song && getVideoId() === vid) updateMetadataUI();
+    }).catch(() => {
+      musicMetaPrimingVideoId = '';
+    });
+  }
+  return {
+    title: (sm && sm.song) ? sm.song : dom.title,
+    artist: (sm && sm.artist) ? sm.artist : dom.artist
+  };
+}
+
+// 曲名がまだ取れない（遷移直後でプレイヤーも切り替わっていない）時の再試行
+let metaRetryTimer = null;
+let metaRetryCount = 0;
+
 function updateMetadataUI() {
   const infoArea = document.getElementById('mv-info-area');
   const {
     title: songTitle,
     artist: artistName
-  } = getCleanedMetadata();
+  } = getDisplayMetadata();
+  if (metaRetryTimer) {
+    clearTimeout(metaRetryTimer);
+    metaRetryTimer = null;
+  }
+  if (!songTitle && metaRetryCount < 12) {
+    metaRetryCount++;
+    metaRetryTimer = setTimeout(updateMetadataUI, 400);
+  } else if (songTitle) {
+    metaRetryCount = 0;
+  }
+  // 同じ内容なら組み直さない（マーキーの採寸＝強制レイアウトを省く）
+  if (infoArea && infoArea._ytiMeta === songTitle + '\u0000' + artistName && infoArea.firstChild) return;
   if (infoArea) {
+    infoArea._ytiMeta = songTitle + '\u0000' + artistName;
     const rmTitle = document.getElementById('rm-song-title');
     const rmArtist = document.getElementById('rm-artist-name');
     const vinylLabel = document.getElementById('vinyl-label');
@@ -1470,12 +2126,25 @@ function updateMetadataUI() {
       const vThumb = getHighResThumbnail();
       if (vThumb) vinylLabel.style.backgroundImage = `url('${vThumb}')`;
     }
-    infoArea.innerHTML = `<h1 id="mv-song-title">${songTitle}</h1><p id="mv-artist-name">${artistName}</p>`;
-    const titleEl = document.getElementById('mv-song-title');
-    if (titleEl) {
-      if (titleEl.scrollWidth > titleEl.clientWidth) {
-        titleEl.classList.add('marquee');
-        titleEl.innerHTML = `<span>${songTitle}</span><span>${songTitle}</span>`;
+    // 動画タイトルは投稿者が自由に付けられる文字列なので、innerHTMLで組むと
+    // <img onerror=...> のようなタイトルの動画を開いた時点でスクリプトが動く。
+    // 拡張のISOLATED世界（chrome.runtime が触れる）で実行されるため必ずDOM APIで組む。
+    infoArea.textContent = '';
+    const titleEl = document.createElement('h1');
+    titleEl.id = 'mv-song-title';
+    titleEl.textContent = songTitle;
+    const artistEl = document.createElement('p');
+    artistEl.id = 'mv-artist-name';
+    artistEl.textContent = artistName;
+    infoArea.appendChild(titleEl);
+    infoArea.appendChild(artistEl);
+    if (songTitle && titleEl.scrollWidth > titleEl.clientWidth) {
+      titleEl.classList.add('marquee');
+      titleEl.textContent = '';
+      for (let i = 0; i < 2; i++) {
+        const span = document.createElement('span');
+        span.textContent = songTitle;
+        titleEl.appendChild(span);
       }
     }
     lastTitle = "";
@@ -1618,18 +2287,192 @@ function parseLrcText(lrcText) {
   return lines;
 }
 
-// LRCLIBから同期歌詞を検索。タイトル・アーティスト類似度＋動画尺との整合でスコアリング。
-// 結果はvideoIdごとにlocalStorageへキャッシュ（ヒット30日・ミス24時間）し、再取得を避ける。
+// ===== 外部歌詞の検索（複数の情報源）=====
+// LRCLIB と NetEase Cloud Music を並列に検索し、曲名・アーティストの類似度と
+// 動画尺との整合で採点して、最も確からしい同期歌詞を選ぶ。
+//  - LRCLIB：オープンな歌詞DB。精度は高いが、応答に数十秒かかることがある
+//  - NetEase：日本・韓国の曲も含めて収録数が多く、応答も速い（約1秒）
+// 片方で良い結果が出たら、もう片方は少しだけ待って打ち切る（遅い方に全体を引きずられない）。
+// 結果はvideoIdごとにlocalStorageへキャッシュ（ヒット30日・ミス12時間）し、再取得を避ける。
+const YTI_EXT_CACHE_PREFIX = 'yti_lrc2_cache_';
+// 片方の結果が出てから、もう片方を待つ時間
+const YTI_EXT_GRACE_MS = 1500;
+
+// 外部歌詞の候補を採点する（0〜1強）。曲名7：アーティスト3、尺が合えば加点。
+function scoreLyricCandidate(meta, videoDur, name, artist, durSec) {
+  const normTitle = yti_normalizeForMatch(meta.title);
+  const normArtist = yti_normalizeForMatch(meta.artist);
+  let score = yti_diceSim(normTitle, yti_normalizeForMatch(name || ''));
+  if (normArtist) {
+    score = score * 0.7 + yti_diceSim(normArtist, yti_normalizeForMatch(artist || '')) * 0.3;
+  }
+  if (videoDur > 30 && durSec) {
+    // 原曲がMVより長いことは通常ない（MVは映像パディングで曲より長い）
+    if (durSec > videoDur + 5) score -= 0.3;
+    else score += Math.max(0, 0.15 - (Math.abs(videoDur - durSec) / videoDur) * 0.3);
+  }
+  // 探している曲名に無いのに、リミックス・カラオケ・インスト版を指している候補は下げる
+  const variant = /(remix|inst(rumental)?|off\s*vocal|karaoke|カラオケ|伴奏|acoustic|ver\.|version|live)/i;
+  if (variant.test(name || '') && !variant.test(meta.title || '')) score -= 0.25;
+  return score;
+}
+
+// NetEase等のLRCの冒頭・末尾に入る「作詞：」「制作人：」などのクレジット行を除く
+function stripLyricCredits(lines) {
+  if (!lines.length) return lines;
+  const lastTime = lines[lines.length - 1].baseTime;
+  const credit = /^[^:：]{1,16}\s*[:：]\s*\S/;
+  const out = lines.filter(l => {
+    if (!credit.test(l.text)) return true;
+    return !(l.baseTime < 40 || l.baseTime > lastTime - 15);
+  });
+  // 「純音楽、请欣赏」等のインスト表示だけの歌詞は歌詞なしとして扱う
+  if (out.length <= 2 && out.every(l => /纯音乐|請欣賞|请欣赏|instrumental/i.test(l.text))) return [];
+  return out;
+}
+
+async function findLrclibLyrics(meta, videoDur) {
+  const enc = encodeURIComponent;
+  const queries = [];
+  // 構造化メタがある時は /api/get の完全一致を最優先で叩く。
+  // artist+track（+album/duration）が正確なので、検索より遥かに当たる。
+  if (meta.fromStructured && meta.artist) {
+    let getUrl = `https://lrclib.net/api/get?artist_name=${enc(meta.artist)}&track_name=${enc(meta.title)}`;
+    if (meta.album) getUrl += `&album_name=${enc(meta.album)}`;
+    if (videoDur > 30) getUrl += `&duration=${Math.round(videoDur)}`;
+    queries.push({ url: getUrl, exact: true });
+    // durationはMVの映像パディングぶんズレるので、外した版も試す
+    if (videoDur > 30) {
+      let noDur = `https://lrclib.net/api/get?artist_name=${enc(meta.artist)}&track_name=${enc(meta.title)}`;
+      if (meta.album) noDur += `&album_name=${enc(meta.album)}`;
+      queries.push({ url: noDur, exact: true });
+    }
+  }
+  if (meta.artist) {
+    queries.push({ url: `https://lrclib.net/api/search?track_name=${enc(meta.title)}&artist_name=${enc(meta.artist)}` });
+    queries.push({ url: `https://lrclib.net/api/search?q=${enc(meta.artist + ' ' + meta.title)}` });
+  }
+  queries.push({ url: `https://lrclib.net/api/search?q=${enc(meta.title)}` });
+  // 構造化メタで見つからない場合に備え、従来のタイトルパース版も後段に残す
+  if (meta.fromStructured && meta.domTitle && meta.domTitle !== meta.title) {
+    if (meta.domArtist) {
+      queries.push({ url: `https://lrclib.net/api/search?track_name=${enc(meta.domTitle)}&artist_name=${enc(meta.domArtist)}` });
+    }
+    queries.push({ url: `https://lrclib.net/api/search?q=${enc(meta.domTitle)}` });
+  }
+  let responded = false;
+  // 候補の問い合わせは一斉に投げ、優先順に評価する
+  const inflight = queries.map(q => fetchViaBackground(q.url));
+  for (let qi = 0; qi < queries.length; qi++) {
+    const q = queries[qi];
+    const text = await inflight[qi];
+    if (!text) continue;
+    responded = true;
+    let list = [];
+    try {
+      list = JSON.parse(text);
+    } catch (e) {
+      continue;
+    }
+    // /api/get は配列ではなく単一オブジェクト（見つからない時は error を返す）
+    if (list && !Array.isArray(list)) list = list.syncedLyrics ? [list] : [];
+    if (!Array.isArray(list) || !list.length) continue;
+    let best = null;
+    let bestScore = 0;
+    for (const item of list) {
+      if (!item || !item.syncedLyrics) continue;
+      const score = scoreLyricCandidate(meta, videoDur, item.trackName, item.artistName, item.duration);
+      if (score > bestScore) {
+        bestScore = score;
+        best = item;
+      }
+    }
+    // /api/get はartist+trackの完全一致なので、類似度の閾値を下げてよい。
+    // ただし構造化メタの抽出ミスを拾わないよう最低限の一致は要求する。
+    const threshold = q.exact ? 0.25 : 0.45;
+    if (best && bestScore >= threshold) {
+      const lines = parseLrcText(best.syncedLyrics);
+      if (lines.length >= 4) {
+        return {
+          responded: true,
+          score: bestScore + (q.exact ? 0.1 : 0),
+          result: { lines, trackName: best.trackName || meta.title, artistName: best.artistName || meta.artist, duration: best.duration || 0, source: 'LRCLIB' }
+        };
+      }
+    }
+  }
+  return { responded, score: 0, result: null };
+}
+
+async function findNeteaseLyrics(meta, videoDur) {
+  const enc = encodeURIComponent;
+  const terms = [];
+  if (meta.artist) terms.push(meta.artist + ' ' + meta.title);
+  terms.push(meta.title);
+  if (meta.domTitle && meta.domTitle !== meta.title) terms.push((meta.domArtist ? meta.domArtist + ' ' : '') + meta.domTitle);
+  const texts = await Promise.all(terms.map(t => fetchViaBackground(`https://music.163.com/api/cloudsearch/pc?s=${enc(t)}&type=1&limit=10&offset=0`)));
+  let responded = false;
+  const seen = new Set();
+  const cands = [];
+  for (const text of texts) {
+    if (!text) continue;
+    let d = null;
+    try {
+      d = JSON.parse(text);
+    } catch (e) {
+      continue;
+    }
+    responded = true;
+    const songs = (d && d.result && d.result.songs) || [];
+    for (const song of songs) {
+      if (!song || seen.has(song.id)) continue;
+      seen.add(song.id);
+      const artist = (song.ar || song.artists || []).map(a => a && a.name).filter(Boolean).join(' & ');
+      const durSec = (song.dt || song.duration || 0) / 1000;
+      // 別名（日本語の原題がaliasに入っていることがある）も曲名として照合する
+      let score = scoreLyricCandidate(meta, videoDur, song.name, artist, durSec);
+      for (const alias of (song.alia || song.alias || [])) {
+        score = Math.max(score, scoreLyricCandidate(meta, videoDur, alias, artist, durSec));
+      }
+      cands.push({ song, artist, durSec, score });
+    }
+  }
+  cands.sort((a, b) => b.score - a.score);
+  // 上位から順に歌詞を取りに行く（リミックス等で歌詞が空の候補を飛ばす）
+  for (const c of cands.slice(0, 3)) {
+    if (c.score < 0.45) break;
+    const text = await fetchViaBackground(`https://music.163.com/api/song/lyric?id=${c.song.id}&lv=1`);
+    if (!text) continue;
+    let d = null;
+    try {
+      d = JSON.parse(text);
+    } catch (e) {
+      continue;
+    }
+    const lrc = d && d.lrc && d.lrc.lyric;
+    if (!lrc) continue;
+    const lines = stripLyricCredits(parseLrcText(lrc));
+    if (lines.length >= 4) {
+      return {
+        responded: true,
+        score: c.score,
+        result: { lines, trackName: c.song.name || meta.title, artistName: c.artist || meta.artist, duration: c.durSec || 0, source: 'NetEase' }
+      };
+    }
+  }
+  return { responded, score: 0, result: null };
+}
+
 async function fetchLrclibLyrics(videoId) {
-  const cacheKey = 'yti_lrc_cache_' + (videoId || '');
+  const cacheKey = YTI_EXT_CACHE_PREFIX + (videoId || '');
   try {
     const raw = localStorage.getItem(cacheKey);
     if (raw) {
       const c = JSON.parse(raw);
       const age = Date.now() - (c.ts || 0);
-      if (c.miss && age < 24 * 3600 * 1000) return null;
+      if (c.miss && age < 12 * 3600 * 1000) return null;
       if (!c.miss && Array.isArray(c.lines) && c.lines.length && age < 30 * 24 * 3600 * 1000) {
-        return { lines: c.lines, trackName: c.trackName || '', artistName: c.artistName || '', duration: c.duration || 0 };
+        return { lines: c.lines, trackName: c.trackName || '', artistName: c.artistName || '', duration: c.duration || 0, source: c.source || '' };
       }
     }
   } catch (e) {}
@@ -1638,60 +2481,40 @@ async function fetchLrclibLyrics(videoId) {
       localStorage.setItem(cacheKey, JSON.stringify(Object.assign({ ts: Date.now() }, obj)));
     } catch (e) {}
   };
-  const meta = getCleanedMetadata();
+  const meta = await getMusicMetadata(videoId);
   if (!meta.title) return null;
   const videoDur = (targetVideo && isFinite(targetVideo.duration)) ? targetVideo.duration : 0;
-  const queries = [];
-  if (meta.artist) {
-    queries.push(`https://lrclib.net/api/search?track_name=${encodeURIComponent(meta.title)}&artist_name=${encodeURIComponent(meta.artist)}`);
-    queries.push(`https://lrclib.net/api/search?q=${encodeURIComponent(meta.artist + ' ' + meta.title)}`);
-  }
-  queries.push(`https://lrclib.net/api/search?q=${encodeURIComponent(meta.title)}`);
-  const normTitle = yti_normalizeForMatch(meta.title);
-  const normArtist = yti_normalizeForMatch(meta.artist);
-  for (const url of queries) {
-    const text = await fetchViaBackground(url);
-    if (!text) continue;
-    let list = [];
+  const tasks = [findLrclibLyrics(meta, videoDur), findNeteaseLyrics(meta, videoDur)];
+  const outcomes = [null, null];
+  let settled = 0;
+  await new Promise((resolve) => {
+    let graceTimer = null;
+    tasks.forEach((p, i) => {
+      p.catch(() => ({ responded: false, score: 0, result: null })).then((o) => {
+        outcomes[i] = o;
+        settled++;
+        if (settled === tasks.length) {
+          clearTimeout(graceTimer);
+          resolve();
+        } else if (o && o.result && !graceTimer) {
+          // 1件目の歌詞が見つかった。もう片方はもう少しだけ待つ
+          graceTimer = setTimeout(resolve, YTI_EXT_GRACE_MS);
+        }
+      });
+    });
+  });
+  const found = outcomes.filter(o => o && o.result).sort((a, b) => b.score - a.score);
+  if (found.length) {
+    const best = found[0].result;
     try {
-      list = JSON.parse(text);
-    } catch (e) {
-      continue;
-    }
-    if (!Array.isArray(list)) continue;
-    let best = null;
-    let bestScore = 0;
-    for (const item of list) {
-      if (!item || !item.syncedLyrics) continue;
-      let score = yti_diceSim(normTitle, yti_normalizeForMatch(item.trackName || ''));
-      if (normArtist) {
-        score = score * 0.7 + yti_diceSim(normArtist, yti_normalizeForMatch(item.artistName || '')) * 0.3;
-      }
-      if (videoDur > 30 && item.duration) {
-        // 原曲がMVより長いことは通常ない（MVは映像パディングで曲より長い）
-        if (item.duration > videoDur + 5) score -= 0.3;
-        else score += Math.max(0, 0.15 - (Math.abs(videoDur - item.duration) / videoDur) * 0.3);
-      }
-      if (score > bestScore) {
-        bestScore = score;
-        best = item;
-      }
-    }
-    if (best && bestScore >= 0.45) {
-      const lines = parseLrcText(best.syncedLyrics);
-      if (lines.length >= 4) {
-        const result = {
-          lines,
-          trackName: best.trackName || meta.title,
-          artistName: best.artistName || meta.artist,
-          duration: best.duration || 0
-        };
-        saveCache(result);
-        return result;
-      }
-    }
+      console.info('[YT Immersion] 外部歌詞: ' + best.source + ' / ' + best.trackName + ' — ' + best.artistName);
+    } catch (e) {}
+    saveCache(best);
+    return best;
   }
-  saveCache({ miss: true });
+  // 応答が1件も無かった＝通信自体が失敗している。ミスとして確定させず、次回再試行する。
+  const allResponded = outcomes.every(o => o && o.responded);
+  if (allResponded) saveCache({ miss: true });
   return null;
 }
 
@@ -1708,11 +2531,29 @@ function loadLyricsAnchors(videoId) {
     if (!raw) return [];
     const arr = JSON.parse(raw);
     if (Array.isArray(arr)) {
-      return arr.filter(a => a && typeof a.lrcTime === 'number' && typeof a.videoTime === 'number')
+      // src の無い古い保存データは、ユーザーが手で合わせたものとして扱う
+      const list = arr.filter(a => a && typeof a.lrcTime === 'number' && typeof a.videoTime === 'number')
+        .map(a => Object.assign({}, a, { src: a.src || 'manual' }))
         .sort((a, b) => a.lrcTime - b.lrcTime);
+      // 古い推定方法による音声の補正（語りのイントロで歌い出しを誤認していた等）は使わず、推定し直す
+      if (list.some(a => a.src === 'audio' && a.ver !== ytiAudioSync.version)) return [];
+      // 別の歌詞（取得元が変わった）に対して打った補正は当てない。指紋の無い古い補正は
+      // 以前の取得元（LRCLIB / NetEase）の歌詞を表示している時だけ使う。
+      const lh = ytiLyricsHash(externalLyricsInfo);
+      const prov = externalLyricsInfo && externalLyricsInfo.provider;
+      return list.filter(a => a.lh ? a.lh === lh : (prov === 'lrclib' || prov === 'netease'));
     }
   } catch (e) {}
   return [];
+}
+
+// アンカー列の出どころ。'manual'（手で合わせた）> 'asr'（字幕照合）> 'audio'（音声推定）の順に信頼する。
+function anchorsSource(anchors) {
+  if (!anchors || !anchors.length) return '';
+  if (anchors.some(a => a.src === 'manual')) return 'manual';
+  // 共有された同期（community.js）は字幕照合と同じ扱い（音声の推定では上書きしない）
+  if (anchors.every(a => a.src === 'asr' || a.src === 'shared')) return 'asr';
+  return 'audio';
 }
 
 function saveLyricsAnchors() {
@@ -1726,34 +2567,52 @@ function saveLyricsAnchors() {
 // アンカーを適用して lyricsData を再構築＋再描画。アンカー変更時にも呼ぶ。
 function applyExternalLyricsData() {
   if (!externalLyricsInfo) return;
-  const anchors = lyricsAnchors;
-  const offsetAt = (t) => {
-    if (!anchors.length) return 0;
-    // 最初のアンカーより前の行にも先頭オフセット（=イントロ分）を適用する
-    let off = anchors[0].videoTime - anchors[0].lrcTime;
-    for (const a of anchors) {
-      if (a.lrcTime <= t + 0.001) off = a.videoTime - a.lrcTime;
-      else break;
-    }
-    return off;
-  };
-  const shifted = externalLyricsInfo.lines.map(l => ({
-    time: Math.max(0, l.baseTime + offsetAt(l.baseTime)),
-    baseTime: l.baseTime,
-    text: l.text,
-    el: null
-  }));
-  // アンカーの打ち間違いで時刻が逆行しても行順・ハイライトが壊れないよう単調化
-  for (let i = 1; i < shifted.length; i++) {
-    if (shifted[i].time < shifted[i - 1].time) shifted[i].time = shifted[i - 1].time + 0.01;
+  const info = externalLyricsInfo;
+  // 曲の時計 → 動画の時計。土台は YouTube Music の公式の対応表（あれば）、その上に
+  // 手で合わせた・字幕照合・音声推定の対応点。動画で切られた区間の行は隠す。
+  const warp = YTICore.warp.buildWarp({ segments: info.segments || [], anchors: lyricsAnchors });
+  ytiCurrentWarp = warp;
+  const mapped = YTICore.warp.applyToLines(info.lines.map(l => ({
+    start: l.baseTime, end: l.end, text: l.text, words: l.words, bg: l.bg, srcIndex: l.srcIndex, agent: l.agent
+  })), warp);
+  const shifted = mapped.filter(l => !l.hidden).map(l => {
+    const o = { time: l.time, baseTime: l.baseTime, text: l.text, el: null, srcIndex: l.srcIndex };
+    if (Number.isFinite(l.endTime)) o.duration = Math.max(0.3, l.endTime - l.time);
+    if (l.words) o.words = l.words;
+    else if (ytiAsrCharTimes && ytiAsrCharTimes[l.srcIndex]) o.charTimes = ytiAsrCharTimes[l.srcIndex];
+    if (l.bg) o.bg = l.bg;
+    if (l.agent) o.agent = l.agent;
+    return o;
+  });
+  ytiHiddenLineCount = mapped.length - shifted.length;
+  if (typeof ytiDecorateExternalLines === 'function') {
+    try {
+      ytiDecorateExternalLines(shifted, info, warp);
+    } catch (e) {}
   }
-  lyricsData = processRawLyricsToProcessed(shifted);
+  const next = processRawLyricsToProcessed(shifted);
   const lyricsArea = document.getElementById('mv-lyrics-area');
   const rootContainer = document.getElementById('mv-root-container');
   if (rootContainer) rootContainer.classList.remove('no-lyrics-mode');
-  if (lyricsArea) {
-    lyricsArea.classList.remove('no-lyrics', 'fade-out');
-    renderLyricsDOM(lyricsArea);
+  // キャッシュから先に描いた歌詞と行・時刻が同じなら、DOMを作り直さずに
+  // 外部歌詞としての情報（同期ボタン用の baseTime）だけを足す。
+  // 作り直すとスクロール位置とハイライトが一瞬リセットされてチラつくため。
+  const domReady = !!(lyricsArea && lyricsArea.querySelector('.lyric-line-container'));
+  if (sameLyricsTiming(lyricsData, next) && (domReady || !lyricsArea)) {
+    next.forEach((l, i) => {
+      if (typeof l.baseTime === 'number') lyricsData[i].baseTime = l.baseTime;
+    });
+    attachLyricSyncButtons();
+  } else {
+    lyricsData = next;
+    if (lyricsArea) {
+      lyricsArea.classList.remove('no-lyrics', 'fade-out');
+      renderLyricsDOM(lyricsArea);
+    } else {
+      lyricsRenderVersion++;
+    }
+    // 同期アンカーを打ち直した結果も含めて保存し、次回は即座に同じ状態で出す
+    saveLyricsToCache(loadedLyricsVideoId || getVideoId(), lyricsData, { external: true });
   }
   // アンカーで行時刻が変わったので、カラオケ用の単語タイミングも付け直す
   if (asrWordStream) attachKaraokeTiming(asrWordStream);
@@ -1762,11 +2621,39 @@ function applyExternalLyricsData() {
   } catch (e) {}
 }
 
+// 行・時刻・種類が同じ歌詞か（表示を作り直す必要があるかの判定）
+function sameLyricsTiming(a, b) {
+  if (!a || !b || a.length !== b.length || !a.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (Math.abs((a[i].time || 0) - (b[i].time || 0)) > 0.02) return false;
+    if ((a[i].text || '') !== (b[i].text || '')) return false;
+    if (!!a[i].isInstrumental !== !!b[i].isInstrumental) return false;
+  }
+  return true;
+}
+
+// 外部歌詞の行に「この行を今に同期」ボタンを付ける（まだ無い行だけ）
+function attachLyricSyncButtons() {
+  if (!usingExternalLyrics) return;
+  lyricsData.forEach(line => {
+    if (line.isInstrumental || typeof line.baseTime !== 'number' || !line.el) return;
+    if (line.el.querySelector('.lyric-sync-tap')) return;
+    const syncBtn = cloneLyricButtonTemplate('sync');
+    syncBtn.onclick = (e) => {
+      e.stopPropagation();
+      addLyricsAnchorForLine(line);
+    };
+    line.el.appendChild(syncBtn);
+  });
+}
+
 // 「この行を今に合わせる」：この行以降のアンカーを張り替える（前半の同期は保持）
 function addLyricsAnchorForLine(line) {
   if (!targetVideo || typeof line.baseTime !== 'number') return;
-  lyricsAnchors = lyricsAnchors.filter(a => a.lrcTime < line.baseTime - 0.001);
-  lyricsAnchors.push({ lrcTime: line.baseTime, videoTime: targetVideo.currentTime });
+  // 手で合わせ直した以上、残す前半のアンカーも含めて「手動」として固定する
+  lyricsAnchors = lyricsAnchors.filter(a => a.lrcTime < line.baseTime - 0.001).map(a => Object.assign({}, a, { src: 'manual', lh: ytiLyricsHash(externalLyricsInfo) }));
+  lyricsAnchors.push({ lrcTime: line.baseTime, videoTime: targetVideo.currentTime, src: 'manual', lh: ytiLyricsHash(externalLyricsInfo) });
+  ytiAudioSync.stop();
   lyricsAnchors.sort((a, b) => a.lrcTime - b.lrcTime);
   saveLyricsAnchors();
   applyExternalLyricsData();
@@ -1775,74 +2662,128 @@ function addLyricsAnchorForLine(line) {
 
 // 全体を±deltaへ微調整（アンカーが無ければ先頭アンカーを新設）
 function nudgeLyricsOffset(delta) {
-  if (!lyricsAnchors.length) lyricsAnchors = [{ lrcTime: 0, videoTime: delta }];
-  else lyricsAnchors = lyricsAnchors.map(a => ({ lrcTime: a.lrcTime, videoTime: a.videoTime + delta }));
+  const lh = ytiLyricsHash(externalLyricsInfo);
+  // 公式の対応表がある時は、対応表で写した位置からのずれとして足す
+  const base0 = ytiCurrentWarp ? ytiCurrentWarp.map(0).time : 0;
+  if (!lyricsAnchors.length) lyricsAnchors = [{ lrcTime: 0, videoTime: base0 + delta, src: 'manual', lh }];
+  else lyricsAnchors = lyricsAnchors.map(a => ({ lrcTime: a.lrcTime, videoTime: a.videoTime + delta, rate: a.rate, src: 'manual', lh }));
+  ytiAudioSync.stop();
   saveLyricsAnchors();
   applyExternalLyricsData();
-  const off = lyricsAnchors[0].videoTime - lyricsAnchors[0].lrcTime;
+  const off = lyricsAnchors[0].videoTime - (ytiCurrentWarp ? YTICore.warp.buildWarp({ segments: externalLyricsInfo.segments || [] }).map(lyricsAnchors[0].lrcTime).time : lyricsAnchors[0].lrcTime);
   showToast(`オフセット: ${off >= 0 ? '+' : ''}${off.toFixed(1)}秒`);
 }
 
 // ===== ASRハイブリッド自動整合 =====
 // ASR字幕は誤字だらけだがタイミングは実音声由来で正確。テキストはLRCLIB、
 // 時計はASRから借りる：行同士をあいまい照合し、オフセットの階段を推定する。
+//
+// 以前は「各行について最も似ているASR区間」を独立に探していたが、サビのように
+// 同じ歌詞が何度も出る曲では別の回のサビと対応してしまい、ズレがばらばらに
+// 見えて整合を諦める（＝手動調整が必要になる）ことが多かった。
+// 歌詞もASRも時間順に進むので、順序を保ったまま対応付ける（動的計画法）。
 function autoAlignWithAsr(lrcLines, asrSegs) {
   if (!lrcLines || lrcLines.length < 4 || !asrSegs || asrSegs.length < 4) return null;
   const asr = asrSegs
     .map(s => ({ time: s.time, norm: yti_normalizeForMatch(s.text) }))
     .filter(s => s.norm.length >= 2);
-  if (asr.length < 4) return null;
-  const cands = [];
-  for (const line of lrcLines) {
-    const norm = yti_normalizeForMatch(line.text);
-    if (norm.length < 5) continue;
-    let bestSim = 0;
-    let bestTime = 0;
-    for (let i = 0; i < asr.length; i++) {
-      // ASRは行の切れ目がLRCとズレるため、隣接2セグメント連結も試す
-      let sim = yti_diceSim(norm, asr[i].norm);
-      if (i + 1 < asr.length) {
-        const sim2 = yti_diceSim(norm, asr[i].norm + asr[i + 1].norm);
+  const lrc = lrcLines.map(l => ({ time: l.baseTime, norm: yti_normalizeForMatch(l.text) }));
+  const N = lrc.length;
+  const M = asr.length;
+  if (M < 4) return null;
+  const MIN_SIM = 0.42;
+  // MVは原曲より前に映像が入ることはあっても、大きく前倒しになることはない
+  const MAX_LEAD = 20;
+  const MAX_LAG = 240;
+  // gain[i][j]：LRCのi行目とASRのj区間を対応させた時の得点（対応させられなければ0）
+  const gain = new Array(N);
+  for (let i = 0; i < N; i++) {
+    gain[i] = new Float32Array(M);
+    const norm = lrc[i].norm;
+    if (norm.length < 4) continue;
+    for (let j = 0; j < M; j++) {
+      const delta = asr[j].time - lrc[i].time;
+      if (delta < -MAX_LEAD || delta > MAX_LAG) continue;
+      // ASRは行の切れ目がLRCとズレるため、隣接区間との連結も試す
+      let sim = yti_diceSim(norm, asr[j].norm);
+      if (j + 1 < M) {
+        const sim2 = yti_diceSim(norm, asr[j].norm + asr[j + 1].norm);
         if (sim2 > sim) sim = sim2;
       }
-      if (sim > bestSim) {
-        bestSim = sim;
-        bestTime = asr[i].time;
+      if (j > 0) {
+        const sim3 = yti_diceSim(norm, asr[j - 1].norm + asr[j].norm);
+        if (sim3 > sim) sim = sim3;
       }
-    }
-    if (bestSim >= 0.55) {
-      cands.push({ lrcTime: line.baseTime, videoTime: bestTime, delta: bestTime - line.baseTime });
+      if (sim >= MIN_SIM) gain[i][j] = sim - MIN_SIM + 0.05;
     }
   }
-  if (cands.length < 3) return null;
-  cands.sort((a, b) => a.lrcTime - b.lrcTime);
-  // オフセットの連続性（±2秒）で区間分け。単発の飛び値は捨てる。
+  // dp[i][j]：LRCの先頭i行とASRの先頭j区間で作れる、順序を保った対応の最大得点
+  const W = M + 1;
+  const dp = new Float32Array((N + 1) * W);
+  const from = new Uint8Array((N + 1) * W); // 1:行を飛ばす 2:区間を飛ばす 3:対応させる
+  for (let i = 1; i <= N; i++) {
+    for (let j = 1; j <= M; j++) {
+      let best = dp[(i - 1) * W + j];
+      let how = 1;
+      const skipAsr = dp[i * W + j - 1];
+      if (skipAsr > best) {
+        best = skipAsr;
+        how = 2;
+      }
+      const g = gain[i - 1][j - 1];
+      if (g > 0) {
+        const take = dp[(i - 1) * W + j - 1] + g;
+        if (take > best) {
+          best = take;
+          how = 3;
+        }
+      }
+      dp[i * W + j] = best;
+      from[i * W + j] = how;
+    }
+  }
+  const pairs = [];
+  let i = N;
+  let j = M;
+  while (i > 0 && j > 0) {
+    const how = from[i * W + j];
+    if (how === 3) {
+      pairs.push({ lrcTime: lrc[i - 1].time, videoTime: asr[j - 1].time, delta: asr[j - 1].time - lrc[i - 1].time });
+      i--;
+      j--;
+    } else if (how === 2) j--;
+    else i--;
+  }
+  pairs.reverse();
+  if (pairs.length < 3) return null;
+  const median = (arr) => {
+    const s = [...arr].sort((x, y) => x - y);
+    return s[Math.floor(s.length / 2)];
+  };
+  // ズレの連続性（区間の中央値から±1.5秒）で区間分け。単発の飛び値は捨てる。
   const groups = [];
-  let cur = [cands[0]];
-  for (let i = 1; i < cands.length; i++) {
-    if (Math.abs(cands[i].delta - cur[cur.length - 1].delta) <= 2.0) cur.push(cands[i]);
+  let cur = [pairs[0]];
+  for (let k = 1; k < pairs.length; k++) {
+    const m = median(cur.map(c => c.delta));
+    if (Math.abs(pairs[k].delta - m) <= 1.5) cur.push(pairs[k]);
     else {
       groups.push(cur);
-      cur = [cands[i]];
+      cur = [pairs[k]];
     }
   }
   groups.push(cur);
   const solid = groups.filter(g => g.length >= 2);
   if (!solid.length) return null;
-  // マッチの大半が安定区間に属していなければ照合自体を信用しない
+  // 対応の大半が安定区間に属していなければ照合自体を信用しない
   const covered = solid.reduce((n, g) => n + g.length, 0);
-  if (covered < cands.length * 0.6) return null;
-  const median = (arr) => {
-    const s = [...arr].sort((x, y) => x - y);
-    return s[Math.floor(s.length / 2)];
-  };
+  if (covered < 3 || covered < pairs.length * 0.5) return null;
   const anchors = [];
   for (const g of solid) {
     const off = median(g.map(c => c.delta));
     // 直前の区間とオフセットがほぼ同じなら統合（間に飛び値があっただけ）
     if (anchors.length) {
       const prevOff = anchors[anchors.length - 1].videoTime - anchors[anchors.length - 1].lrcTime;
-      if (Math.abs(prevOff - off) < 1.0) continue;
+      if (Math.abs(prevOff - off) < 0.8) continue;
     }
     anchors.push({ lrcTime: g[0].lrcTime, videoTime: g[0].lrcTime + off });
   }
@@ -1948,6 +2889,10 @@ function parseCaptionWords(text) {
 // 直接fetchが空ボディを返す環境（potトークン必須化以降）での本命ルート。
 // CCの状態は元に戻す：OFFだったならOFFへ、ONだったなら元のトラックへ。
 function forceInterceptAsrRaw(videoId, asrTrack, restoreCode) {
+  return ytiPlayerMutex.run('asr-load', () => ytiForceInterceptAsrRawUnlocked(videoId, asrTrack, restoreCode));
+}
+
+function ytiForceInterceptAsrRawUnlocked(videoId, asrTrack, restoreCode) {
   return new Promise((resolve) => {
     let timeoutId;
     const ccBtnEl = document.querySelector('.ytp-subtitles-button');
@@ -2102,25 +3047,34 @@ function attachKaraokeTiming(words) {
 
 // 毎フレーム呼ばれる塗り更新。ASR単語タイミングがあれば折れ線補間で、
 // 無い行は行の表示時間で線形に0→1へ（近似カラオケ）。
+// 毎フレーム呼ばれるので、DOMの検索や全行の走査はしない。
+// 現在行は syncLyrics（timeupdate）が決めた番号から、次の行に進んだかだけを見る。
+let karaokeClassApplied = null;
+
 function updateKaraokeFill() {
-  const root = document.getElementById('mv-root-container');
+  const root = rootContainer;
   if (!root) return;
-  if (karaokeEnabledCache === null) karaokeEnabledCache = getMvOption('mv_karaoke', false);
-  if (!karaokeEnabledCache) {
-    if (root.classList.contains('karaoke-on')) root.classList.remove('karaoke-on');
-    return;
+  if (typeof ytiAdActive !== 'undefined' && ytiAdActive) return;
+  if (karaokeEnabledCache === null) karaokeEnabledCache = getMvOption('mv_karaoke', true);
+  if (karaokeClassApplied !== karaokeEnabledCache) {
+    root.classList.toggle('karaoke-on', karaokeEnabledCache);
+    karaokeClassApplied = karaokeEnabledCache;
   }
-  if (!root.classList.contains('karaoke-on')) root.classList.add('karaoke-on');
+  if (!karaokeEnabledCache) return;
   if (!targetVideo || !lyricsData || !lyricsData.length) return;
   const t = targetVideo.currentTime;
-  let idx = -1;
-  for (let i = 0; i < lyricsData.length; i++) {
-    if (lyricsData[i].time <= t) idx = i;
-    else break;
+  let idx = activeLyricIndex;
+  if (idx < 0 || idx >= lyricsData.length || lyricsData[idx].time > t) idx = heldLyricIndex(findLyricIndexAt(t));
+  else if (!(usingExternalLyrics && ytiAudioSync.isHoldingIntro())) {
+    while (idx + 1 < lyricsData.length && lyricsData[idx + 1].time <= t) idx++;
   }
   if (idx < 0) return;
   const line = lyricsData[idx];
   if (!line || line.isInstrumental) return;
+  if (line.tokens && typeof ytiFillTokens === 'function') {
+    ytiFillTokens(line, t);
+    return;
+  }
   let frac = 0;
   const pts = line.karaoke;
   if (pts && pts.length >= 2) {
@@ -2166,7 +3120,7 @@ async function loadAsrWordsAndAttach(asrTrack, videoId, token, restoreCode) {
     return;
   }
   // カラオケOFF（既定）のときは取得自体を行わない（無駄な通信・CC操作をしない）
-  if (!getMvOption('mv_karaoke', false)) return;
+  if (!getMvOption('mv_karaoke', true)) return;
   const allowIntercept = true;
   try {
     const raw = await getAsrRawText(videoId, asrTrack, allowIntercept, restoreCode);
@@ -2196,8 +3150,21 @@ function buildExternalLyricsHeader(lyricsHeader) {
   const badge = document.createElement('span');
   badge.className = 'mv-lyric-action-btn';
   badge.style.cssText = 'cursor:default;opacity:0.8;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
-  badge.textContent = `♪ ${externalLyricsInfo.trackName} — ${externalLyricsInfo.artistName}`;
-  badge.title = 'LRCLIBから取得した外部歌詞です。ズレている場合は、今歌われている行の時計ボタンで同期できます';
+  badge.textContent = `♪ ${externalLyricsInfo.trackName} — ${externalLyricsInfo.artistName}` + (externalLyricsInfo.source ? ` (${externalLyricsInfo.source})` : '');
+  // 経過は後から届く取得元のぶんも見せたいので、ホバーした時に作り直す
+  const badgeTitle = () => {
+    const info = externalLyricsInfo;
+    if (!info) return '';
+    const syncHow = (info.segments && info.segments.length) ? 'YouTube Music の曲⇔動画の対応表で同期しています' :
+      (info.timebase === 'video' ? 'この動画に合わせた時刻（LRCHub）で表示しています' : '自動生成字幕・音声から自動で同期します');
+    return `歌詞の取得元: ${info.source}\n${syncHow}。ズレている場合は今歌われている行の時計ボタン、または [ ] キーで合わせ直せます` +
+      (ytiHiddenLineCount > 0 ? `\n動画で切られている ${ytiHiddenLineCount} 行は表示していません` : '') +
+      (typeof ytiTraceText === 'function' ? '\n\n― 取得の経過 ―\n' + ytiTraceText() : '');
+  };
+  badge.title = badgeTitle();
+  badge.addEventListener('mouseenter', () => {
+    badge.title = badgeTitle();
+  });
   lyricsHeader.appendChild(badge);
   const mkBtn = (label, title, fn) => {
     const b = document.createElement('button');
@@ -2213,66 +3180,207 @@ function buildExternalLyricsHeader(lyricsHeader) {
   };
   mkBtn('−0.5s', '歌詞全体を0.5秒早める', () => nudgeLyricsOffset(-0.5));
   mkBtn('+0.5s', '歌詞全体を0.5秒遅らせる', () => nudgeLyricsOffset(0.5));
-  mkBtn('同期リセット', 'この動画の同期補正をすべて消去', () => {
+  mkBtn('同期リセット', 'この動画の同期補正をすべて消去して、自動同期をやり直す', () => {
     lyricsAnchors = [];
     saveLyricsAnchors();
     applyExternalLyricsData();
-    showToast('同期をリセットしました');
+    showToast('同期をリセットしました。自動で合わせ直します');
+    runExternalAutoSync(loadedLyricsVideoId || getVideoId(), mvContentToken, externalAsrTrack, '');
   });
 }
 
+// 外部歌詞の自動同期に使うASRトラック（同期リセット時の再実行用に覚えておく）
+let externalAsrTrack = null;
+// ASR との文字単位の突き合わせで得た、外部歌詞の各行の文字ごとの時刻（動画の時計）
+let ytiAsrCharTimes = null;
+// 動画で切られた区間として隠した行の数
+let ytiHiddenLineCount = 0;
+// 外部歌詞の本文の指紋。同期の補正は「どの歌詞に対して打ったか」と一緒に保存する
+// （取得元が変わると曲の時計の頭出しがずれるため、別の歌詞の補正は当てない）。
+function ytiLyricsHash(info) {
+  if (!info || !info.lines) return '';
+  return YTICore.text.hash32(info.lines.slice(0, 12).map(l => YTICore.text.normalizeForMatch(l.text)).join('|'));
+}
+
 // 字幕が取れなかったときの外部歌詞フォールバック本体。
+// 歌詞は見つかった時点で（保存済みの同期補正があればそれを当てて）すぐ表示し、
+// 自動同期は裏で進めて、終わったら行の時刻だけを差し替える。
+// 以前はASRの取得（CCの強制切替・最大数秒）を待ってから表示していたため遅かった。
 // 成功時は表示まで済ませて true を返す。呼び出し元は直後に世代チェックすること。
 async function tryExternalLyricsFallback(videoId, lyricsArea, lyricsHeader, token, asrTrack) {
-  if (!getMvOption('mv_external_lyrics', false)) return false;
-  if (lyricsArea) {
+  if (!getMvOption('mv_external_lyrics', true)) return false;
+  if (lyricsArea && !isShowingCachedLyrics(videoId)) {
     lyricsArea.classList.remove('no-lyrics', 'fade-out');
-    lyricsArea.innerHTML = '<p style="color:rgba(255,255,255,0.3); font-size:20px; padding:20px;">外部データベースで歌詞を検索中...</p>';
+    lyricsArea.innerHTML = '<p style="color:rgba(255,255,255,0.3); font-size:20px; padding:20px;">歌詞を探しています...</p>';
   }
-  const result = await fetchLrclibLyrics(videoId);
+  const result = await findExternalLyricsDoc(videoId, {
+    // 先に出した歌詞より良いもの（語単位）が後から届いたら差し替える
+    onUpgrade: (better) => {
+      if (token !== mvContentToken || loadedLyricsVideoId !== videoId || !usingExternalLyrics) return;
+      ytiAdoptExternalInfo(better, videoId, null, token, asrTrack, true);
+    }
+  });
   if (token !== mvContentToken) return false;
   if (!result) return false;
+  ytiAdoptExternalInfo(result, videoId, lyricsHeader, token, asrTrack, false);
+  return true;
+}
+
+// 外部歌詞を表示中の歌詞として採用する（初回・格上げの両方）
+function ytiAdoptExternalInfo(result, videoId, lyricsHeader, token, asrTrack, isUpgrade) {
   externalLyricsInfo = result;
   usingExternalLyrics = true;
+  externalAsrTrack = asrTrack || null;
   lyricsAnchors = loadLyricsAnchors(videoId);
-  let autoAligned = false;
-  // ASRの生レスポンスを1回だけ堅牢取得（キャッシュ→fetch→強制ロード横取り）し、
-  // 行時計（自動整合）と単語時計（カラオケ塗り）の両方に使う
-  if (asrTrack) {
-    const asrRaw = await getAsrRawText(videoId, asrTrack, true);
-    if (token !== mvContentToken) return false;
-    if (asrRaw) {
-      const words = parseCaptionWords(asrRaw);
-      if (words && words.length >= 8) asrWordStream = words;
-      // 保存済みの手動同期があればそれを優先。無ければASRの時計で自動整合を試みる。
-      if (lyricsAnchors.length === 0) {
-        const asrSegs = parseCaptionResponse(asrRaw);
-        if (asrSegs && asrSegs.length) {
-          const autoAnchors = autoAlignWithAsr(result.lines, asrSegs);
-          if (autoAnchors && autoAnchors.length) {
-            lyricsAnchors = autoAnchors;
-            autoAligned = true;
-          }
-        }
-      }
-    }
-  }
   loadedLyricsVideoId = videoId || '';
+  lyricsLoadDoneVideoId = videoId || '';
   currentLyricsLang = '';
   applyExternalLyricsData();
   buildExternalLyricsHeader(lyricsHeader);
-  if (autoAligned) showToast('外部歌詞を自動生成字幕と自動同期しました');
-  else if (lyricsAnchors.length) showToast('外部歌詞を表示中（保存済みの同期補正を適用）');
-  else showToast('外部歌詞を表示中。ズレる場合は行の時計ボタンで同期できます');
-  return true;
+  const savedSrc = anchorsSource(lyricsAnchors);
+  if (isUpgrade) showToast('語単位の歌詞に切り替えました（' + result.source + '）');
+  else if (savedSrc === 'manual') showToast('外部歌詞を表示中（保存済みの同期補正を適用）');
+  else if (result.segments && result.segments.length) showToast('YouTube Music の対応表で歌詞を同期しました');
+  try {
+    console.info('[YT Immersion] 外部歌詞: ' + result.source + ' / ' + result.trackName + ' — ' + result.artistName +
+      (result.segments && result.segments.length ? ' / 公式の対応表 ' + result.segments.length + '区間' : ''));
+  } catch (e) {}
+  runExternalAutoSync(videoId, token, asrTrack, savedSrc);
+  if (!isUpgrade) {
+    try {
+      ytiPrefetchNext(videoId);
+    } catch (e) {}
+  }
+  if (typeof ytiOnExternalLyricsReady === 'function') {
+    try {
+      ytiOnExternalLyricsReady(videoId, token);
+    } catch (e) {}
+  }
+}
+
+// 外部歌詞の自動同期（裏で実行）。
+//   1) ASRがあれば、歌詞と順序を保って照合してズレの階段を求める（最も正確）
+//   2) ASRが無い・照合できない時は、再生中の音声から曲の始まり・間奏の挿入を推定する
+// 手で合わせた補正（manual）は常に優先し、自動では上書きしない。
+async function runExternalAutoSync(videoId, token, asrTrack, savedSrc) {
+  const stillCurrent = () => token === mvContentToken && usingExternalLyrics && loadedLyricsVideoId === videoId;
+  const info = externalLyricsInfo;
+  // 公式の対応表がある・この動画に紐付いた時刻（LRCHub）なら、推定で合わせる必要はない
+  const exact = !!(info && ((info.segments && info.segments.length) || info.timebase === 'video'));
+  const needAlign = !exact && savedSrc !== 'manual' && savedSrc !== 'asr';
+  const wantKaraoke = getMvOption('mv_karaoke', true);
+  // 音声による推定は「再生の頭から聞いている」ことが前提なので、ASRの取得を待たずに始めておく
+  if (needAlign && savedSrc !== 'audio') startAudioSync(videoId, token);
+  // ASR は ①この動画の歌詞かの確認 ②時計合わせ ③語単位の塗り に使う。
+  // 公式の語単位の歌詞なら、どれも要らないので字幕に触らない。
+  const needCheck = !(info && info.official);
+  const needKaraokeTimes = wantKaraoke && info && info.quality < 2;
+  if (!asrTrack || (!needAlign && !needCheck && !needKaraokeTimes)) return;
+  let asrRaw = null;
+  try {
+    asrRaw = await getAsrRawText(videoId, asrTrack, true);
+  } catch (e) {}
+  if (!stillCurrent() || !asrRaw) return;
+  const words = parseCaptionWords(asrRaw);
+  if (!words || words.length < 8) return;
+  asrWordStream = words;
+  const check = ytiCheckWithAsr(externalLyricsInfo, words);
+  if (check && typeof ytiTrace === 'function') {
+    ytiTrace(videoId, '自動生成字幕', `一致率 ${(check.coverage * 100).toFixed(0)}%` + (check.substantive ? '' : '（字幕に中身なし）') +
+      (check.anchors && check.anchors.length ? ` / 対応点 ${check.anchors.length}` : ''));
+  }
+  if (check && !check.accepted) {
+    // 歌詞が動画の歌とほとんど一致しない＝別の曲・別の言語の歌詞。出さない方がまし。
+    try {
+      console.warn('[YT Immersion] 外部歌詞が自動生成字幕と一致しないため取り下げ: ' + info.source + ' 一致率 ' + check.coverage.toFixed(2));
+    } catch (e) {}
+    ytiStoreSet(YTI_EXT2_PREFIX + videoId, { at: Date.now(), miss: true });
+    usingExternalLyrics = false;
+    externalLyricsInfo = null;
+    lyricsData = [];
+    const lyricsArea = document.getElementById('mv-lyrics-area');
+    if (lyricsArea) showNoLyrics(lyricsArea, '見つかった歌詞がこの動画の歌と一致しないため表示しません', { fontSize: '16px', opacity: '0.6' });
+    return;
+  }
+  if (needAlign && anchorsSource(lyricsAnchors) !== 'manual') {
+    let auto = (check && check.anchors && check.anchors.length) ? check.anchors : null;
+    // 文字単位で取れなかった時は、従来の行単位の照合（字幕の区間どうし）を試す
+    if (!auto) {
+      const asrSegs = parseCaptionResponse(asrRaw);
+      const old = (asrSegs && asrSegs.length) ? autoAlignWithAsr(externalLyricsInfo.lines, asrSegs) : null;
+      if (old && old.length) auto = old.map(a => ({ lrcTime: a.lrcTime, videoTime: a.videoTime, src: 'asr' }));
+    }
+    if (auto && auto.length) {
+      ytiAudioSync.stop();
+      const lh = ytiLyricsHash(externalLyricsInfo);
+      lyricsAnchors = auto.map(a => Object.assign({}, a, { src: 'asr', lh }));
+      saveLyricsAnchors();
+      if (check) ytiAsrCharTimes = check.charTimes;
+      applyExternalLyricsData();
+      const cut = lyricsData.length ? (externalLyricsInfo.lines.length - lyricsData.filter(l => !l.isInstrumental).length) : 0;
+      const rated = auto.some(a => a.rate && Math.abs(a.rate - 1) > 0.01);
+      showToast('外部歌詞を自動生成字幕と自動同期しました' + (rated ? '（速度の違いも補正）' : '') + (cut > 0 ? `（動画に無い${cut}行を非表示）` : ''));
+      return;
+    }
+  }
+  if (check && check.charTimes && check.charTimes.length) {
+    ytiAsrCharTimes = check.charTimes;
+    applyExternalLyricsData();
+  } else if (asrWordStream) attachKaraokeTiming(asrWordStream);
+}
+
+function startAudioSync(videoId, token) {
+  if (!targetVideo || !externalLyricsInfo) return;
+  // 公式の対応表・この動画の時刻がある時は推定しない（推定の方が粗い）
+  if ((externalLyricsInfo.segments && externalLyricsInfo.segments.length) || externalLyricsInfo.timebase === 'video') {
+    ytiAudioSync.stop();
+    return;
+  }
+  const started = ytiAudioSync.start({
+    video: targetVideo,
+    key: videoId,
+    lrcLines: externalLyricsInfo.lines,
+    trackDuration: externalLyricsInfo.duration || 0,
+    onAnchors: (anchors, kind) => {
+      if (token !== mvContentToken || !usingExternalLyrics || loadedLyricsVideoId !== videoId) {
+        ytiAudioSync.stop();
+        return;
+      }
+      // その間に手動・ASRで合わせられていたら、音声の推定では上書きしない
+      const src = anchorsSource(lyricsAnchors);
+      if (src === 'manual' || src === 'asr') {
+        ytiAudioSync.stop();
+        return;
+      }
+      const lh = ytiLyricsHash(externalLyricsInfo);
+      lyricsAnchors = anchors.map(a => Object.assign({}, a, { lh }));
+      saveLyricsAnchors();
+      applyExternalLyricsData();
+      showToast(kind === 'intro' ? '歌い出しを音声から検出して歌詞を同期しました' : '間奏の映像パートを検出して歌詞を合わせ直しました');
+    }
+  });
+  if (started) console.info('[YT Immersion] 音声による外部歌詞の自動同期を開始');
 }
 
 async function updateMVContent(retryCount = 0, token = null) {
   // 世代トークン：新しいロードが始まったら、進行中の古いチェーン（リトライ含む）は
   // ここで打ち切る。複数チェーンが同時にCCボタンを操作して両方失敗する競合を防ぐ。
-  if (token === null) token = ++mvContentToken;
+  if (token === null) {
+    // 表示中の動画の歌詞が出来上がっているなら、世代を進めずに帰る。
+    // （yt-page-data-updated の遅延発火のたびに世代が進むと、裏で進めている自動同期・
+    //   語単位への格上げ・訳の取得が「古い世代」として捨てられていた）
+    const vidNow = new URLSearchParams(window.location.search).get('v');
+    const la = document.getElementById('mv-lyrics-area');
+    if (retryCount === 0 && vidNow && vidNow === loadedLyricsVideoId && lyricsData.length > 0 && la && la.querySelector('.lyric-line-container')) {
+      updateMetadataUI();
+      try {
+        updateSidebarContent(0);
+      } catch (e) {}
+      return;
+    }
+    token = ++mvContentToken;
+  }
   if (token !== mvContentToken) return;
-  const infoArea = document.getElementById('mv-info-area');
   const lyricsArea = document.getElementById('mv-lyrics-area');
   const lyricsHeader = document.getElementById('mv-lyrics-header');
   const videoId = new URLSearchParams(window.location.search).get('v');
@@ -2291,19 +3399,43 @@ async function updateMVContent(retryCount = 0, token = null) {
     lyricsArea.onmouseenter = null;
     lyricsArea.onmouseleave = null;
   }
+  ytiLoadingVideoId = videoId || '';
   isLyricSelectionMode = false;
   if (retryCount === 0) {
-    if (infoArea) infoArea.innerHTML = '';
-    if (lyricsArea) lyricsArea.innerHTML = '<p style="color:rgba(255,255,255,0.3); font-size:20px; padding:20px;">読み込み中...</p>';
+    // 曲名は消さずに、取得処理より先に今の動画のものへ更新する
+    try {
+      updateMetadataUI();
+    } catch (e) {}
     if (lyricsHeader) lyricsHeader.innerHTML = '';
     lyricsData = [];
     lyricsByLanguage = {};
     currentLyricsLang = '';
     usingExternalLyrics = false;
     externalLyricsInfo = null;
+    externalAsrTrack = null;
     lyricsAnchors = [];
     asrWordStream = null;
+    ytiAsrCharTimes = null;
+    ytiHiddenLineCount = 0;
+    ytiCurrentWarp = null;
+    // 視聴ページで再生が始まった時から記録している同じ動画の音量は、捨てずに引き継ぐ
+    if (ytiAudioSync.primedKey() !== videoId) ytiAudioSync.stop();
+    // 外部歌詞の自動同期に備えて、曲の冒頭から音量を記録しておく
+    // （歌詞の検索を待ってから聞き始めると、イントロの長さが分からなくなる）
+    if (getMvOption('mv_external_lyrics', true) && targetVideo && videoId) {
+      try {
+        ytiAudioSync.prime(targetVideo, videoId);
+      } catch (e) {}
+    }
+    lyricsRenderVersion++;
+    cacheShownVideoId = '';
+    cacheShownSig = '';
+    lyricsLoadDoneVideoId = '';
     if (rootContainer) rootContainer.classList.remove('no-lyrics-mode');
+    // 保存済みの歌詞があれば通信を待たずに即描画し、以降の取得は裏で続行する
+    if (!showLyricsFromCache(videoId) && lyricsArea) {
+      lyricsArea.innerHTML = '<p style="color:rgba(255,255,255,0.3); font-size:20px; padding:20px;">読み込み中...</p>';
+    }
   }
   const tracklistData = await getCaptionTracklistFromPlayer();
   if (token !== mvContentToken) return;
@@ -2314,18 +3446,24 @@ async function updateMVContent(retryCount = 0, token = null) {
   // プレイヤーがまだ前の動画の情報を返している間（SPA遷移直後）は待って再試行。
   // 前の動画のトラックURLで取得すると失敗や別の曲の歌詞表示につながる。
   const isStaleResponse = !!(tracklistData.videoId && videoId && tracklistData.videoId !== videoId);
+  // プレイヤーがこの動画の情報を返した上で字幕トラックが0本なら、字幕は無いと確定してよい。
+  // 以前は1秒×5回待ってから外部歌詞を探していたため、表示までに5秒以上かかっていた。
+  const confirmedNoTracks = !isStaleResponse && !!tracklistData.videoId && tracklistData.videoId === videoId;
   if (isStaleResponse || !tracks || tracks.length === 0) {
-    const maxRetry = isStaleResponse ? 10 : 5;
+    const maxRetry = isStaleResponse ? 10 : (confirmedNoTracks ? 1 : 5);
     if (retryCount < maxRetry) {
-      setTimeout(() => updateMVContent(retryCount + 1, token), 1000);
+      setTimeout(() => updateMVContent(retryCount + 1, token), confirmedNoTracks ? 500 : 1000);
       return;
     } else {
       // 字幕トラックが1本も無い動画：外部歌詞（LRCLIB）を探す
       const gotExternal = await tryExternalLyricsFallback(videoId, lyricsArea, lyricsHeader, token, null);
       if (token !== mvContentToken) return;
-      if (!gotExternal && lyricsArea) {
+      // キャッシュから既に歌詞を出せている場合は、それを消してまで
+      // 「ありません」に上書きしない
+      if (!gotExternal && lyricsArea && !isShowingCachedLyrics(videoId)) {
         showNoLyrics(lyricsArea, '歌詞情報がありません');
       }
+      lyricsLoadDoneVideoId = videoId || '';
     }
     updateMetadataUI();
     try {
@@ -2354,9 +3492,10 @@ async function updateMVContent(retryCount = 0, token = null) {
     const asrTrack = langList.find(t => t.isAuto) || null;
     const gotExternal = await tryExternalLyricsFallback(videoId, lyricsArea, lyricsHeader, token, asrTrack);
     if (token !== mvContentToken) return;
-    if (!gotExternal && lyricsArea) {
+    if (!gotExternal && lyricsArea && !isShowingCachedLyrics(videoId)) {
       showNoLyrics(lyricsArea, '自動生成字幕のため非表示', { fontSize: '16px', opacity: '0.6' });
     }
+    lyricsLoadDoneVideoId = videoId || '';
     updateMetadataUI();
     try {
       updateSidebarContent(0);
@@ -2389,6 +3528,9 @@ async function updateMVContent(retryCount = 0, token = null) {
   }
   const forceIntercept = (track) => {
     if (!track) return Promise.resolve(null);
+    return ytiPlayerMutex.run('track-load', () => forceInterceptUnlocked(track));
+  };
+  const forceInterceptUnlocked = (track) => {
     return new Promise((resolve) => {
       let timeoutId;
       // メタ情報付きの YTI_CaptionData を使い、別動画・自動翻訳・別言語の
@@ -2487,20 +3629,32 @@ async function updateMVContent(retryCount = 0, token = null) {
     const asrTrack = langList.find(t => t.isAuto) || null;
     const gotExternal = await tryExternalLyricsFallback(videoId, lyricsArea, lyricsHeader, token, asrTrack);
     if (token !== mvContentToken) return;
-    if (!gotExternal && lyricsArea) {
+    if (!gotExternal && lyricsArea && !isShowingCachedLyrics(videoId)) {
       showNoLyrics(lyricsArea, '歌詞の取得に失敗しました');
     }
+    lyricsLoadDoneVideoId = videoId || '';
     updateMetadataUI();
     try {
       updateSidebarContent(0);
     } catch (e) {}
     return;
   }
-  lyricsData = mergeDualLyrics(newMainRaw, newSubRaw);
+  // 字幕で表示できるので、外部歌詞の音声同期に備えた音量の記録は止める
+  ytiAudioSync.stop();
+  const merged = mergeDualLyrics(newMainRaw, newSubRaw);
+  // キャッシュから描いた内容と同じなら、配列ごと差し替えずに今の表示を維持する
+  const sameAsCached = cacheShownVideoId === videoId && !!cacheShownSig &&
+    lyricsSignature(merged) === cacheShownSig;
+  if (!sameAsCached) lyricsData = merged;
   loadedLyricsVideoId = videoId || '';
+  lyricsLoadDoneVideoId = videoId || '';
   currentLyricsLang = mainTrack.code;
   localStorage.setItem('mv_lyrics_lang_code', mainTrack.code);
   localStorage.setItem('mv_lyrics_sub_lang_code', subTrack ? subTrack.code : 'none');
+  saveLyricsToCache(videoId, lyricsData, {
+    lang: mainTrack.code,
+    subLang: subTrack ? subTrack.code : ''
+  });
   if (lyricsHeader) {
     lyricsHeader.innerHTML = '';
     const mainLangSelect = document.createElement('select');
@@ -2570,6 +3724,10 @@ async function updateMVContent(retryCount = 0, token = null) {
         currentLyricsLang = mCode;
         localStorage.setItem('mv_lyrics_lang_code', mTrack.code);
         localStorage.setItem('mv_lyrics_sub_lang_code', sTrack ? sTrack.code : 'none');
+        saveLyricsToCache(videoId, lyricsData, {
+          lang: mTrack.code,
+          subLang: sTrack ? sTrack.code : ''
+        });
         renderLyricsDOM(lyricsArea);
         if (asrWordStream) attachKaraokeTiming(asrWordStream);
         try {
@@ -2594,7 +3752,7 @@ async function updateMVContent(retryCount = 0, token = null) {
       const rmScroll = document.getElementById('rm-lyrics-scroll');
       if (rmScroll) rmScroll.classList.remove('mode-jp-only', 'mode-native-only');
       if (currentMode === 0) {
-        langBtn.innerHTML = '<svg viewBox="0 0 24 24" style="width:15px;height:15px;margin-right:5px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg> 全表示';
+        langBtn.innerHTML = '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg> 全表示';
         langBtn.style.background = '';
         langBtn.style.color = '';
         localStorage.setItem('mv_lyrics_mode', 'all');
@@ -2624,7 +3782,7 @@ async function updateMVContent(retryCount = 0, token = null) {
     };
     const copyAllBtn = document.createElement('button');
     copyAllBtn.className = 'mv-lyric-action-btn';
-    copyAllBtn.innerHTML = '<svg viewBox="0 0 24 24" style="width:15px;height:15px;margin-right:5px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg> 全コピー';
+    copyAllBtn.innerHTML = '<svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg> 全コピー';
     copyAllBtn.onclick = () => {
       let targetText = [];
       lyricsData.forEach(l => {
@@ -2640,7 +3798,7 @@ async function updateMVContent(retryCount = 0, token = null) {
     };
     const selectBtn = document.createElement('button');
     selectBtn.className = 'mv-lyric-action-btn';
-    selectBtn.innerHTML = '<svg viewBox="0 0 24 24" style="width:15px;height:15px;margin-right:5px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg> 選択';
+    selectBtn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg> 選択';
     selectBtn.onclick = () => {
       isLyricSelectionMode = !isLyricSelectionMode;
       if (isLyricSelectionMode) {
@@ -2666,8 +3824,8 @@ async function updateMVContent(retryCount = 0, token = null) {
         lyricsArea.classList.remove('selecting');
         const selected = lyricsArea.querySelectorAll('.selected');
         selected.forEach(el => el.classList.remove('selected'));
-        selectBtn.innerHTML = '<svg viewBox="0 0 24 24" style="width:15px;height:15px;margin-right:5px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg> 選択';
-        copyAllBtn.innerHTML = '<svg viewBox="0 0 24 24" style="width:15px;height:15px;margin-right:5px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg> 全コピー';
+        selectBtn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg> 選択';
+        copyAllBtn.innerHTML = '<svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg> 全コピー';
         copyAllBtn.classList.remove('primary');
         copyAllBtn.onclick = () => {
           let targetText = [];
@@ -2689,13 +3847,14 @@ async function updateMVContent(retryCount = 0, token = null) {
     lyricsHeader.appendChild(copyAllBtn);
     const lrcBtn = document.createElement('button');
     lrcBtn.className = 'mv-lyric-action-btn';
-    lrcBtn.innerHTML = '<svg viewBox="0 0 24 24" style="width:15px;height:15px;margin-right:5px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> LRC保存';
+    lrcBtn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> LRC保存';
     lrcBtn.onclick = () => {
       downloadLrc();
     };
     lyricsHeader.appendChild(lrcBtn);
   }
-  if (lyricsArea) renderLyricsDOM(lyricsArea);
+  // キャッシュ表示と同一内容なら描き直さない（スクロール位置とハイライトを保つ）
+  if (!sameAsCached && lyricsArea) renderLyricsDOM(lyricsArea);
   // 手動字幕を表示しつつ、ASRトラックがあれば単語タイミングを非同期で借りて
   // カラオケ塗りを有効化する（テキストは正しい字幕、時計はASR）
   try {
@@ -2707,6 +3866,11 @@ async function updateMVContent(retryCount = 0, token = null) {
   try {
     syncLyrics();
   } catch (e) {}
+  // 訳・読み・パート分けなど（language.js / parts.js）と、次の動画の歌詞の先読み
+  try {
+    ytiOnCaptionLyricsReady(videoId, token);
+    ytiPrefetchNext(videoId);
+  } catch (e) {}
   updateMetadataUI();
   try {
     updateSidebarContent(0);
@@ -2715,7 +3879,7 @@ async function updateMVContent(retryCount = 0, token = null) {
 
 function updateSidebarContent(retryCount = 0) {
   const listContainer = document.getElementById('mv-next-list');
-  if (!listContainer) return;
+  if (!listContainer || !isSidebarEnabled()) return;
   const currentVid = new URLSearchParams(window.location.search).get('v');
   let items = [];
   let sourceMode = 'related';
@@ -2757,17 +3921,27 @@ function updateSidebarContent(retryCount = 0) {
       const channelEl = item.querySelector('.secondary-metadata') || item.querySelector('#byline-container') || item.querySelector('ytd-channel-name');
       if (channelEl) artistText = channelEl.textContent.trim().replace(/\n/g, '').replace(/\s+/g, ' ');
       const thumbSrc = `https://i.ytimg.com/vi/${vidId}/hqdefault.jpg`;
+      // タイトル等は投稿者が自由に付けられる文字列なので、HTMLとしてではなくテキストとして入れる
       const card = document.createElement('a');
       card.className = 'mv-next-item';
       card.href = href;
-      card.onclick = (e) => {};
-      card.innerHTML = `
-                <img src="${thumbSrc}" class="mv-next-item-thumb" loading="lazy" style="width: 110px; height: 62px; border-radius: 6px; object-fit: cover; background: #333; margin-right: 15px; flex-shrink: 0;">
-                <div class="mv-next-info">
-                    <div class="mv-next-title">${titleText}</div>
-                    <div class="mv-next-artist">${artistText}</div>
-                </div>
-            `;
+      const img = document.createElement('img');
+      img.src = thumbSrc;
+      img.className = 'mv-next-item-thumb';
+      img.loading = 'lazy';
+      img.style.cssText = 'width: 110px; height: 62px; border-radius: 6px; object-fit: cover; background: #333; margin-right: 15px; flex-shrink: 0;';
+      const info = document.createElement('div');
+      info.className = 'mv-next-info';
+      const titleDiv = document.createElement('div');
+      titleDiv.className = 'mv-next-title';
+      titleDiv.textContent = titleText;
+      const artistDiv = document.createElement('div');
+      artistDiv.className = 'mv-next-artist';
+      artistDiv.textContent = artistText;
+      info.appendChild(titleDiv);
+      info.appendChild(artistDiv);
+      card.appendChild(img);
+      card.appendChild(info);
       tempFragment.appendChild(card);
       count++;
     } catch (e) {}
@@ -2870,13 +4044,22 @@ function buildSettingsPanel() {
     loadedLyricsVideoId = '';
     updateMVContent(0);
   }));
-  panel.appendChild(makeToggle('字幕がない曲は外部歌詞を検索（Beta）', 'LRCLIBから同期歌詞を取得して表示します', 'mv_external_lyrics', false, () => {
+  panel.appendChild(makeToggle('字幕がない曲は外部歌詞を表示', 'YouTube Music の公式歌詞（曲を動画から特定）と、LRCHub / Apple(LyricsPlus) / NetEase / KuGou / LRCLIB を突き合わせて表示します', 'mv_external_lyrics', true, () => {
     showToast('設定を変更しました');
     loadedLyricsVideoId = '';
     updateMVContent(0);
   }));
-  panel.appendChild(makeToggle('カラオケ風ハイライト（Beta）', '歌に合わせて現在行を左から塗ります', 'mv_karaoke', false, (on) => {
+  panel.appendChild(makeToggle('カラオケ風ハイライト', '歌に合わせて語ごとに塗ります（語単位の歌詞が無い曲は自動生成字幕の時刻で推定）', 'mv_karaoke', true, (on) => {
     karaokeEnabledCache = on;
+    updateKaraokeLoop();
+    // 語単位の塗りは描画時に行を語に分けるので、描き直す
+    const la = document.getElementById('mv-lyrics-area');
+    if (la && lyricsData.length) {
+      renderLyricsDOM(la);
+      try {
+        syncLyrics();
+      } catch (e) {}
+    }
     showToast(on ? 'カラオケ風ハイライトをONにしました' : 'カラオケ風ハイライトをOFFにしました');
     // OFF中は単語タイミングを取得していないため、ONにしたら歌詞をロードし直して取得する
     if (on && !asrWordStream) {
@@ -2884,11 +4067,84 @@ function buildSettingsPanel() {
       updateMVContent(0);
     }
   }));
+  const koRubyRow = makeToggle('韓国語の読みを表示', '韓国語の歌詞と字幕（CC）の上に、読みをカタカナで小さく振ります', YTI_KOREAN_RUBY_KEY, false, (on) => {
+    ytiKoreanRuby.setEnabled(on);
+    if (pipWindow) ytiKoreanRuby.applyTo(pipWindow.document);
+    // 行の高さが変わるので、今の行を歌詞欄の中央に置き直す
+    scrollMvLyricsToActive(true);
+    showToast(on ? '韓国語の読みを表示します' : '韓国語の読みを非表示にしました');
+  });
+  panel.appendChild(koRubyRow);
+  panel.appendChild(makeToggle('歌詞の時間差スクロール', '行が変わる時、上の行から順に少しずつ遅れて流れます（YTM-Immersion と同じ動き）', 'mv_lyric_stagger', true, (on) => {
+    showToast(on ? '時間差スクロールをONにしました' : '時間差スクロールをOFFにしました（全行が一緒に動きます）');
+  }));
+  // 黒帯カット（letterbox.js）。保存先はプレイヤーの歯車メニューのトグルと共通
+  const lbxMvRow = makeToggle('黒帯をカット（MVモード）', '上下の黒帯を、映像が続いているような光で埋めます', YTI_LBX_KEY_MV, true, (on) => {
+    ytiLetterboxSetOption(YTI_LBX_KEY_MV, on);
+    showToast(on ? '黒帯カットをONにしました' : '黒帯カットをOFFにしました');
+  });
+  panel.appendChild(lbxMvRow);
+  const lbxNormalRow = makeToggle('黒帯をカット（通常再生）', '通常の画面でも黒帯を切り取り、本来の比率で表示します', YTI_LBX_KEY_NORMAL, false, (on) => {
+    ytiLetterboxSetOption(YTI_LBX_KEY_NORMAL, on);
+    showToast(on ? '通常再生でも黒帯をカットします' : '通常再生の黒帯カットをOFFにしました');
+  });
+  panel.appendChild(lbxNormalRow);
+  // 言語（訳・読み）・パート分け・応援法などの設定（各モジュールが足す）
+  if (typeof ytiExtendSettingsPanel === 'function') {
+    try {
+      ytiExtendSettingsPanel(panel, makeToggle);
+    } catch (e) {}
+  }
+  // プレイヤーの歯車メニュー側で切り替えられた値を、パネルを開くたびに反映する
+  panel.syncLetterboxToggles = () => {
+    [[lbxMvRow, YTI_LBX_KEY_MV, true], [lbxNormalRow, YTI_LBX_KEY_NORMAL, false], [koRubyRow, YTI_KOREAN_RUBY_KEY, false]].forEach(([row, key, def]) => {
+      const input = row.querySelector('input');
+      const sw = row.querySelector('.mv-setting-switch');
+      const on = getMvOption(key, def);
+      if (input) input.checked = on;
+      if (sw) sw.classList.toggle('on', on);
+    });
+  };
   ['click', 'mousedown', 'mouseup'].forEach(evt => panel.addEventListener(evt, e => e.stopPropagation()));
   return panel;
 }
 
+// 一定時間操作が無かった時にMVモードのUIを隠す。onUserAction の高速パスと
+// 共有するために関数として切り出している。
+let ytiUiShown = false;
+
+function hideMvUi() {
+  const settingsPanelEl = document.getElementById('mv-settings-panel');
+  if (settingsPanelEl) settingsPanelEl.classList.remove('open');
+  const elems = [document.getElementById('mv-info-area'), document.getElementById('mv-close-btn'), document.getElementById('mv-settings-btn'), document.getElementById('mv-shot-btn'), document.getElementById('mv-pin-btn'), document.getElementById('mv-lyrics-header'), document.getElementById('mv-record-btn'), document.getElementById('mv-glass-btn'), document.getElementById('mv-glass-slider-container'), document.getElementById('mv-pos-slider-container'), document.getElementById('mv-desktop-btn'), document.getElementById('mv-ambient-controls')];
+  if (elems[0] && !isInfoPinned && !isTitleAlwaysOn) elems[0].classList.remove('visible');
+  for (let i = 1; i < elems.length; i++) {
+    if (elems[i]) elems[i].classList.remove('visible');
+  }
+  const lyricsArea = document.getElementById('mv-lyrics-area');
+  if (lyricsArea && lyricsArea.classList.contains('no-lyrics')) {
+    lyricsArea.classList.add('fade-out');
+  }
+  const posSliderContainer = document.getElementById('mv-pos-slider-container');
+  if (posSliderContainer) {
+    posSliderContainer.style.opacity = '0';
+    posSliderContainer.style.pointerEvents = 'none';
+  }
+  if (rootContainer) rootContainer.classList.add('hide-cursor');
+  ytiUiShown = false;
+}
+
 function onUserAction(e) {
+  // mousemove ごとに十数回の getElementById と classList 操作をしていたため、
+  // マウスを動かしながらMVモードへ入ると描画がカクついていた。
+  // UIが既に表示済みで、単なるマウス移動なら「自動非表示タイマーの延長」だけで済ませる。
+  if (e && e.type === 'mousemove' && ytiUiShown && rootContainer &&
+      !rootContainer.classList.contains('hide-cursor')) {
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = setTimeout(hideMvUi, 3000);
+    return;
+  }
+  ytiUiShown = true;
   const infoArea = document.getElementById('mv-info-area');
   const closeBtn = document.getElementById('mv-close-btn');
   const shotBtn = document.getElementById('mv-shot-btn');
@@ -2931,26 +4187,7 @@ function onUserAction(e) {
       lyricsArea.classList.remove('fade-out');
     }
     if (idleTimer) clearTimeout(idleTimer);
-    idleTimer = setTimeout(() => {
-      const ia = document.getElementById('mv-info-area');
-      const settingsPanelEl = document.getElementById('mv-settings-panel');
-      if (settingsPanelEl) settingsPanelEl.classList.remove('open');
-      const elems = [document.getElementById('mv-info-area'), document.getElementById('mv-close-btn'), document.getElementById('mv-settings-btn'), document.getElementById('mv-shot-btn'), document.getElementById('mv-pin-btn'), document.getElementById('mv-lyrics-header'), document.getElementById('mv-record-btn'), document.getElementById('mv-glass-btn'), document.getElementById('mv-glass-slider-container'), document.getElementById('mv-pos-slider-container'), document.getElementById('mv-desktop-btn'), document.getElementById('mv-ambient-controls')];
-      if (elems[0] && !isInfoPinned && !isTitleAlwaysOn) elems[0].classList.remove('visible');
-      for (let i = 1; i < elems.length; i++) {
-        if (elems[i]) elems[i].classList.remove('visible');
-      }
-      if (lyricsArea && lyricsArea.classList.contains('no-lyrics')) {
-        lyricsArea.classList.add('fade-out');
-      }
-      if (posSliderContainer) {
-        posSliderContainer.style.opacity = '0';
-        posSliderContainer.style.pointerEvents = 'none';
-      }
-      if (rootContainer) {
-        rootContainer.classList.add('hide-cursor');
-      }
-    }, 3000);
+    idleTimer = setTimeout(hideMvUi, 3000);
   }
   if (e && e.type === 'click' && rootContainer) {
     const target = e.target;
@@ -2967,82 +4204,101 @@ function onUserAction(e) {
   }
 }
 
+// 現在時刻に対応する行の番号（time <= t となる最後の行）。行は時刻順なので二分探索する。
+// 数百行の曲でも、timeupdate・毎フレームの呼び出しで全行を走査しないようにするため。
+function findLyricIndexAt(t) {
+  let lo = 0;
+  let hi = lyricsData.length - 1;
+  let ans = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (lyricsData[mid].time <= t) {
+      ans = mid;
+      lo = mid + 1;
+    } else hi = mid - 1;
+  }
+  return ans;
+}
+
+// 外部歌詞の「曲の始まり」を音声で判定している間は、補正前の時刻で歌詞が
+// 先走らないよう、歌詞を進めずに前奏表示（先頭の・・・行）のまま待たせる。
+function heldLyricIndex(index) {
+  if (!usingExternalLyrics || !ytiAudioSync.isHoldingIntro()) return index;
+  return (lyricsData[0] && lyricsData[0].isInstrumental) ? 0 : -1;
+}
+
+// 行を光らせ始めるのを歌より少しだけ早める（光り切るまでの遷移ぶん）
+const YTI_LINE_LEAD = 0.12;
+// syncLyrics が決めた現在行の番号（カラオケの塗りなどが毎フレーム探し直さないように共有する）
+let activeLyricIndex = -1;
+// レコードモードの盤面要素（毎回 getElementById しないように覚えておく）
+let rmVinylEl = null;
+let rmRightPaneEl = null;
+let rmSpinning = null;
+
 function syncLyrics() {
   if (!targetVideo) return;
+  // 広告の再生中は歌詞を進めない（広告の再生位置で本編の歌詞が流れてしまう）
+  if (typeof ytiAdActive !== 'undefined' && ytiAdActive) return;
   const currentTime = targetVideo.currentTime;
-  const vinyl = document.getElementById('vinyl-record');
-  const rightPane = document.querySelector('.rm-right-pane');
-  if (vinyl && rightPane) {
-    if (targetVideo.paused) {
-      vinyl.classList.remove('spinning');
-      rightPane.classList.remove('playing');
-    } else {
-      vinyl.classList.add('spinning');
-      rightPane.classList.add('playing');
-    }
+  if (!rmVinylEl || !rmVinylEl.isConnected) {
+    rmVinylEl = document.getElementById('vinyl-record');
+    rmRightPaneEl = document.querySelector('.rm-right-pane');
+    rmSpinning = null;
   }
-  let activeIndex = -1;
-  for (let i = 0; i < lyricsData.length; i++) {
-    if (lyricsData[i].time <= currentTime) activeIndex = i;
-    else break;
+  const spinning = !targetVideo.paused;
+  if (rmVinylEl && rmRightPaneEl && spinning !== rmSpinning) {
+    rmVinylEl.classList.toggle('spinning', spinning);
+    rmRightPaneEl.classList.toggle('playing', spinning);
+    rmSpinning = spinning;
   }
-  let isInstrumental = false;
+  const activeIndex = heldLyricIndex(findLyricIndexAt(currentTime + YTI_LINE_LEAD));
   if (activeIndex !== -1) {
     const currentLine = lyricsData[activeIndex];
     const nextLine = lyricsData[activeIndex + 1];
     if (currentLine.isInstrumental && currentLine.el) {
       const endTime = nextLine ? nextLine.time : currentLine.time + 5.0;
-      const duration = endTime - currentLine.time;
+      const duration = Math.max(0.1, endTime - currentLine.time);
       const elapsed = Math.max(0, currentTime - currentLine.time);
-      
-      
       let totalProgress = (elapsed / duration) * 3.0;
-      
-      const dots = currentLine.el.querySelectorAll('.instrumental-dot');
-      dots.forEach((d, i) => {
-        
-        let dotProgress = Math.max(0.0, Math.min(1.0, totalProgress - i));
-        d.style.setProperty('--dot-progress', dotProgress);
+      if (!currentLine._dots) currentLine._dots = currentLine.el.querySelectorAll('.instrumental-dot');
+      currentLine._dots.forEach((d, i) => {
+        const dotProgress = Math.max(0.0, Math.min(1.0, totalProgress - i)).toFixed(3);
+        if (d._p !== dotProgress) {
+          d._p = dotProgress;
+          d.style.setProperty('--dot-progress', dotProgress);
+        }
       });
     }
-    const timeSinceStart = currentTime - currentLine.time;
-    const timeToNext = nextLine ? (nextLine.time - currentTime) : 999;
-    if (timeSinceStart > 5 && timeToNext > 5) isInstrumental = true;
-    const gap = nextLine ? (nextLine.time - currentLine.time) : 0;
-    if (gap > 10 && timeSinceStart > 8) isInstrumental = true;
   }
-  if (activeIndex !== lastLyricIndex) {
-    lastLyricIndex = activeIndex;
-  }
-  const lyricsArea = document.getElementById('mv-lyrics-area');
-  const rmScroll = document.getElementById('rm-lyrics-scroll');
-  lyricsData.forEach((line, index) => {
-    const isActive = (index === activeIndex);
-    if (line.el) {
-      if (isActive) {
-        // スクロール自体は startSmoothAutoScroll のrAFループが一元管理する。
-        // ここで scrollTo すると毎フレームの直接代入と競合してガタつき・
-        // スクロール不能の原因になるため、activeクラスの付与のみ行う。
-        line.el.classList.add('active');
-      } else {
-        line.el.classList.remove('active');
-      }
+  lastLyricIndex = activeIndex;
+  activeLyricIndex = activeIndex;
+  // アクティブ行が変わった時だけ、旧行と新行の2つだけを触る。
+  const nextActive = activeIndex >= 0 ? lyricsData[activeIndex] : null;
+  if (nextActive !== activeLyricLine) {
+    const prev = activeLyricLine;
+    if (prev) {
+      if (prev.el) prev.el.classList.remove('active');
+      if (prev.rmEl) prev.rmEl.classList.remove('active');
     }
-    if (line.rmEl) {
-      if (isActive) {
-        line.rmEl.classList.add('active');
+    if (nextActive) {
+      if (nextActive.el) nextActive.el.classList.add('active');
+      if (nextActive.rmEl) {
+        nextActive.rmEl.classList.add('active');
+        const rmScroll = document.getElementById('rm-lyrics-scroll');
         if (rmScroll && rmScroll.parentElement) {
           const containerHeight = rmScroll.parentElement.clientHeight;
-          const itemTop = line.rmEl.offsetTop;
-          const itemHeight = line.rmEl.clientHeight;
+          const itemTop = nextActive.rmEl.offsetTop;
+          const itemHeight = nextActive.rmEl.clientHeight;
           const offset = -(itemTop - containerHeight / 2 + itemHeight / 2 + 160);
           rmScroll.style.transform = `translateY(${offset}px)`;
         }
-      } else {
-        line.rmEl.classList.remove('active');
       }
     }
-  });
+    activeLyricLine = nextActive;
+    // 行送りは行が変わったこの1回だけ（YTM-Immersion と同じ時間差つきのばね）
+    if (nextActive) scrollMvLyricsToActive(false);
+  }
 }
 
 function getVideoId() {
@@ -3102,7 +4358,7 @@ async function startHybridShotSequence() {
     if (frames && frames.length > 0) {
       showShotSelector(frames);
       if (isMVMode && btn) {
-        btn.innerHTML = '<svg viewBox="0 0 24 24" style="width:17px;height:17px;margin-right:7px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg> Shot';
+        btn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg> Shot';
         btn.style.background = "";
       }
       return;
@@ -3209,7 +4465,7 @@ async function takeSingleScreenShot() {
     alert("エラー: " + e.message);
   } finally {
     if (btn) {
-      btn.innerHTML = '<svg viewBox="0 0 24 24" style="width:17px;height:17px;margin-right:7px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg> Shot';
+      btn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg> Shot';
       btn.style.background = "";
     }
   }
@@ -4008,220 +5264,1220 @@ document.addEventListener('click', (e) => {
     e.preventDefault();
   }
 }, true);
-let ipodPiPWindow = null;
+// ===== Mini Player (Document PiP) =====
+// 縦長ウィンドウの上半分に実再生中の動画、下半分に Apple Music 風の歌詞スクロール。
+// 歌詞は MV モードの lyricsData をそのまま使い、PiP 側の DOM を独自に組み立てる。
+// PiPウィンドウ用のCSSはここに直接持つ。style.css を fetch して流し込む方式だと、
+// 拡張機能をリロードした後の古いタブ（chrome.runtime が無効化された状態）や
+// ページ側のCSPで取得に失敗し、PiPが無スタイルのまま開いてしまうため。
+const YTI_PIP_CSS = `
 
-function createIpodElement() {
+
+/* ===== Mini Player (Document PiP) : Apple Music 風 ===== */
+.yti-pip-body {
+  margin: 0;
+  padding: 0;
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+  background: #08080a;
+  color: #fff
+}
+
+#yti-pip {
+  --pip-pad: 16px;
+  position: relative;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: #08080a;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Hiragino Kaku Gothic ProN", "Hiragino Sans", "Segoe UI", Roboto, sans-serif;
+  user-select: none;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility
+}
+
+/* 背景は2層。下がサムネイル（映像が出るまでの下地）、上が再生中の映像を
+   縮小して描いたキャンバス。映像側が乗ると色が実際のシーンに追従する。
+   動き続けると視界の端でチラつくので、位置は固定・色の変化のみ（描画側で平滑化）。 */
+#yti-pip-bg,
+#yti-pip-bg-live {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 130%;
+  height: 130%;
+  object-fit: cover;
+  transform: translate(-50%, -50%);
+  pointer-events: none
+}
+
+#yti-pip-bg {
+  filter: blur(64px) saturate(190%) brightness(0.58);
+  opacity: 0.9;
+  z-index: 0
+}
+
+/* キャンバスは48x27pxしかないので、拡大時の補間だけでほぼ溶ける */
+#yti-pip-bg-live {
+  filter: blur(30px) saturate(180%) brightness(0.58);
+  opacity: 0;
+  z-index: 0;
+  transition: opacity 0.8s ease
+}
+
+#yti-pip-bg-live.ready {
+  opacity: 0.95
+}
+
+/* 上下を締めて中央を抜く：文字が乗る部分だけ暗く落ち着かせる */
+#yti-pip::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(120% 70% at 50% 0%, rgba(0, 0, 0, 0.15) 0%, rgba(0, 0, 0, 0.5) 100%),
+    linear-gradient(to bottom, rgba(0, 0, 0, 0.35) 0%, rgba(0, 0, 0, 0.15) 26%, rgba(0, 0, 0, 0.58) 62%, rgba(0, 0, 0, 0.74) 100%);
+  pointer-events: none;
+  z-index: 1
+}
+
+/* --- 上部：動画（カードとして浮かせる） --- */
+.yti-pip-stage {
+  position: relative;
+  z-index: 2;
+  flex: 0 0 auto;
+  margin: var(--pip-pad) var(--pip-pad) 0 var(--pip-pad);
+  aspect-ratio: 16 / 9;
+  background: #000;
+  border-radius: 14px;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow:
+    0 18px 40px rgba(0, 0, 0, 0.55),
+    0 2px 8px rgba(0, 0, 0, 0.4),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.09)
+}
+
+.yti-pip-stage video,
+video.yti-pip-live-video {
+  position: absolute !important;
+  top: 0 !important;
+  left: 0 !important;
+  width: 100% !important;
+  height: 100% !important;
+  object-fit: contain !important;
+  background: #000 !important;
+  transform: translatez(0) !important;
+  backface-visibility: hidden !important
+}
+
+.yti-pip-stage-fallback svg {
+  width: 40px;
+  height: 40px;
+  fill: rgba(255, 255, 255, 0.22)
+}
+
+/* --- 映像の上に重ねる操作系（普段は非表示） --- */
+.yti-pip-overlay {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 3;
+  padding: 30px 14px 10px 14px;
+  background: linear-gradient(to top, rgba(0, 0, 0, 0.82) 0%, rgba(0, 0, 0, 0.55) 45%, rgba(0, 0, 0, 0) 100%);
+  opacity: 0;
+  transform: translateY(6px);
+  pointer-events: none;
+  transition: opacity 0.22s ease, transform 0.22s cubic-bezier(0.22, 1, 0.36, 1)
+}
+
+#yti-pip.show-controls .yti-pip-overlay {
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto
+}
+
+/* 操作を隠している間の進捗表示。1.5pxの線だけ残す */
+.yti-pip-hairline {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 1.5px;
+  z-index: 4;
+  background: rgba(255, 255, 255, 0.16);
+  opacity: 1;
+  transition: opacity 0.22s ease;
+  pointer-events: none
+}
+
+#yti-pip.show-controls .yti-pip-hairline {
+  opacity: 0
+}
+
+.yti-pip-hairline-fill {
+  height: 100%;
+  width: 100%;
+  transform: scaleX(0);
+  transform-origin: left center;
+  background: rgba(255, 255, 255, 0.75)
+}
+
+.yti-pip-seek {
+  position: relative;
+  padding: 6px 0;
+  cursor: pointer;
+  touch-action: none
+}
+
+.yti-pip-seek-track {
+  position: relative;
+  height: 4px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.26);
+  transition: height 0.2s cubic-bezier(0.22, 1, 0.36, 1)
+}
+
+.yti-pip-seek:hover .yti-pip-seek-track,
+.yti-pip-seek.dragging .yti-pip-seek-track {
+  height: 7px
+}
+
+.yti-pip-seek-fill {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  width: 100%;
+  transform: scaleX(0);
+  transform-origin: left center;
+  border-radius: inherit;
+  background: #fff
+}
+
+.yti-pip-seek-knob {
+  position: absolute;
+  top: 50%;
+  left: 0%;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #fff;
+  transform: translate(-50%, -50%) scale(0);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.6);
+  transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1)
+}
+
+.yti-pip-seek:hover .yti-pip-seek-knob,
+.yti-pip-seek.dragging .yti-pip-seek-knob {
+  transform: translate(-50%, -50%) scale(1)
+}
+
+/* 経過時間 / 操作ボタン / 残り時間 を1行に収める */
+.yti-pip-transport {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px
+}
+
+.yti-pip-time {
+  flex: 0 0 auto;
+  min-width: 38px;
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: rgba(255, 255, 255, 0.75);
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.6)
+}
+
+.yti-pip-time.right {
+  text-align: right
+}
+
+.yti-pip-controls {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px
+}
+
+.yti-pip-btn {
+  border: none;
+  background: transparent;
+  padding: 0;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  color: #fff;
+  transition: background 0.18s ease, transform 0.16s cubic-bezier(0.34, 1.56, 0.64, 1)
+}
+
+.yti-pip-btn:hover {
+  background: rgba(255, 255, 255, 0.16)
+}
+
+.yti-pip-btn:active {
+  transform: scale(0.88);
+  background: rgba(255, 255, 255, 0.24)
+}
+
+.yti-pip-btn svg {
+  width: 19px;
+  height: 19px;
+  fill: currentColor;
+  filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.55))
+}
+
+.yti-pip-btn.primary {
+  width: 42px;
+  height: 42px;
+  background: rgba(255, 255, 255, 0.16);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.16)
+}
+
+.yti-pip-btn.primary:hover {
+  background: rgba(255, 255, 255, 0.26)
+}
+
+.yti-pip-btn.primary svg {
+  width: 22px;
+  height: 22px
+}
+
+.yti-pip-btn.primary .ic-pause {
+  display: none
+}
+
+.yti-pip-btn.primary.playing .ic-play {
+  display: none
+}
+
+.yti-pip-btn.primary.playing .ic-pause {
+  display: block
+}
+
+/* --- 曲名（常時表示はここだけ） ---
+   歌詞より確実に小さく・弱くして「見出し」として読ませる。
+   同じ大きさだと歌詞の1行と見分けがつかず、ちぐはぐに見えるため。 */
+.yti-pip-panel {
+  position: relative;
+  z-index: 2;
+  flex: 0 0 auto;
+  padding: 12px var(--pip-pad) 10px var(--pip-pad);
+  box-sizing: border-box
+}
+
+.yti-pip-meta {
+  min-width: 0;
+  padding-bottom: 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1)
+}
+
+.yti-pip-title {
+  font-size: 15px;
+  font-weight: 650;
+  letter-spacing: -0.012em;
+  line-height: 1.25;
+  color: rgba(255, 255, 255, 0.95);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis
+}
+
+.yti-pip-artist {
+  margin-top: 1px;
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.035em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.42);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis
+}
+
+/* --- 下部：Apple Music 風の歌詞スクロール --- */
+.yti-pip-lyrics {
+  position: relative;
+  z-index: 2;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 0 var(--pip-pad);
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  mask-image: linear-gradient(to bottom, transparent 0%, #000 7%, #000 84%, transparent 100%);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0%, #000 7%, #000 84%, transparent 100%)
+}
+
+.yti-pip-lyrics::-webkit-scrollbar {
+  display: none
+}
+
+.yti-pip-lyrics-inner {
+  padding: 20px 0 58% 0
+}
+
+.yti-pip-line {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  margin-bottom: 19px;
+  cursor: pointer;
+  transform-origin: left center;
+  transform: scale(0.97);
+  opacity: 0.55;
+  filter: blur(0.7px);
+  transition:
+    transform 0.55s cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 0.55s cubic-bezier(0.22, 1, 0.36, 1),
+    filter 0.55s cubic-bezier(0.22, 1, 0.36, 1)
+}
+
+.yti-pip-line:hover {
+  opacity: 0.85;
+  filter: blur(0)
+}
+
+.yti-pip-line.active {
+  transform: scale(1);
+  opacity: 1;
+  filter: blur(0)
+}
+
+.yti-pip-text {
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1.34;
+  letter-spacing: -0.015em;
+  font-feature-settings: "palt";
+  color: rgba(255, 255, 255, 0.62);
+  /* 英語は単語の途中で切らずスペースで折る。日本語は auto-phrase で
+     文節の切れ目を選ぶ。どうしても入らない長い語だけ break-word で逃がす。 */
+  word-break: auto-phrase;
+  line-break: strict;
+  overflow-wrap: break-word;
+  text-wrap: pretty;
+  transition: color 0.55s cubic-bezier(0.22, 1, 0.36, 1), text-shadow 0.55s ease
+}
+
+.yti-pip-sub {
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1.42;
+  letter-spacing: -0.005em;
+  color: rgba(255, 255, 255, 0.42);
+  word-break: auto-phrase;
+  line-break: strict;
+  overflow-wrap: break-word;
+  text-wrap: pretty;
+  transition: color 0.55s cubic-bezier(0.22, 1, 0.36, 1)
+}
+
+.yti-pip-line.active .yti-pip-text {
+  color: #fff;
+  text-shadow: 0 0 26px rgba(255, 255, 255, 0.35), 0 1px 12px rgba(0, 0, 0, 0.4)
+}
+
+.yti-pip-line.active .yti-pip-sub {
+  color: rgba(255, 255, 255, 0.72)
+}
+
+/* 間奏行：3つのドットが順に膨らむ（Apple Music の間奏インジケータ相当） */
+.yti-pip-line.instrumental {
+  margin-bottom: 20px
+}
+
+.yti-pip-dots {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 18px
+}
+
+.yti-pip-dots span {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.55);
+  transform: scale(0.8)
+}
+
+.yti-pip-line.instrumental.active .yti-pip-dots span {
+  animation: yti-pip-dot 1.7s cubic-bezier(0.45, 0, 0.55, 1) infinite
+}
+
+.yti-pip-line.instrumental.active .yti-pip-dots span:nth-child(2) {
+  animation-delay: 0.22s
+}
+
+.yti-pip-line.instrumental.active .yti-pip-dots span:nth-child(3) {
+  animation-delay: 0.44s
+}
+
+@keyframes yti-pip-dot {
+
+  0%,
+  100% {
+    background: rgba(255, 255, 255, 0.4);
+    transform: scale(0.8)
+  }
+
+  35% {
+    background: #fff;
+    transform: scale(1.25)
+  }
+}
+
+/* --- 読み込み中：歌詞の行の形をしたスケルトン --- */
+.yti-pip-skeleton {
+  padding: 22px 0 0 0
+}
+
+.yti-pip-skeleton span {
+  display: block;
+  height: 15px;
+  margin-bottom: 22px;
+  border-radius: 8px;
+  background: linear-gradient(90deg, rgba(255, 255, 255, 0.07) 0%, rgba(255, 255, 255, 0.16) 50%, rgba(255, 255, 255, 0.07) 100%);
+  background-size: 200% 100%;
+  animation: yti-pip-shimmer 1.6s ease-in-out infinite
+}
+
+.yti-pip-skeleton span:nth-child(1) { width: 78% }
+.yti-pip-skeleton span:nth-child(2) { width: 56%; animation-delay: 0.12s }
+.yti-pip-skeleton span:nth-child(3) { width: 68%; animation-delay: 0.24s }
+.yti-pip-skeleton span:nth-child(4) { width: 42%; animation-delay: 0.36s }
+
+@keyframes yti-pip-shimmer {
+  from { background-position: 100% 0 }
+  to { background-position: -100% 0 }
+}
+
+/* --- 歌詞が無い曲：空の歌詞欄を見せず、曲名を主役にした「Now Playing」表示にする ---
+   以前は「歌詞がありません」の小さな文字だけが広い暗がりの中に浮いていた。 */
+.yti-pip-note {
+  display: none
+}
+
+#yti-pip.no-lyrics .yti-pip-lyrics {
+  display: none
+}
+
+#yti-pip.no-lyrics .yti-pip-panel {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 20px calc(var(--pip-pad) + 10px) 32px calc(var(--pip-pad) + 10px);
+  text-align: center;
+  animation: yti-pip-rise 0.5s cubic-bezier(0.22, 1, 0.36, 1) both
+}
+
+#yti-pip.no-lyrics .yti-pip-meta {
+  width: 100%;
+  padding-bottom: 0;
+  border-bottom: none
+}
+
+#yti-pip.no-lyrics .yti-pip-title {
+  font-size: 22px;
+  font-weight: 750;
+  line-height: 1.24;
+  letter-spacing: -0.02em;
+  white-space: normal;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  text-shadow: 0 2px 18px rgba(0, 0, 0, 0.35)
+}
+
+#yti-pip.no-lyrics .yti-pip-artist {
+  margin-top: 7px;
+  font-size: 12px
+}
+
+#yti-pip.no-lyrics .yti-pip-note {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 22px;
+  padding: 8px 14px 8px 12px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+  -webkit-backdrop-filter: blur(16px);
+  backdrop-filter: blur(16px);
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  white-space: nowrap
+}
+
+/* 再生中だけ動く小さなイコライザー（歌詞が無くても「鳴っている」ことが伝わる） */
+.yti-pip-eq {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 11px
+}
+
+.yti-pip-eq i {
+  display: block;
+  width: 2.5px;
+  height: 100%;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.75);
+  transform-origin: bottom;
+  transform: scaleY(0.35)
+}
+
+#yti-pip.is-playing .yti-pip-eq i {
+  animation: yti-pip-eq 1s ease-in-out infinite
+}
+
+#yti-pip.is-playing .yti-pip-eq i:nth-child(2) { animation-delay: -0.35s }
+#yti-pip.is-playing .yti-pip-eq i:nth-child(3) { animation-delay: -0.7s }
+
+@keyframes yti-pip-eq {
+  0%, 100% { transform: scaleY(0.3) }
+  50% { transform: scaleY(1) }
+}
+
+@keyframes yti-pip-rise {
+  from { opacity: 0; transform: translateY(8px) }
+  to { opacity: 1; transform: none }
+}
+
+/* MVモードの表示切替（訳のみ／原文のみ）をPiPにも反映 */
+#yti-pip-lyrics.mode-jp-only .type-native,
+#yti-pip-lyrics.mode-jp-only .type-romaji {
+  display: none !important
+}
+
+#yti-pip-lyrics.mode-native-only .type-jp,
+#yti-pip-lyrics.mode-native-only .type-romaji {
+  display: none !important
+}
+
+/* 韓国語の読み（korean_ruby.js）。ハングルの塊の上にカタカナを小さく振る。
+   切っている間の .lyric-ko はただのインラインなので、行の折り返しは変わらない。
+   カラオケ塗り（background-clip: text）は子孫の字にも掛かるので、ルビも一緒に塗られる。 */
+.yti-korean-ruby .lyric-ko {
+  display: inline-block;
+  text-align: center;
+  text-indent: 0
+}
+
+.yti-korean-ruby .lyric-ko::before {
+  content: attr(data-ruby);
+  display: block;
+  font-size: 0.42em;
+  font-weight: 600;
+  line-height: 1.3;
+  letter-spacing: 0;
+  text-align: center;
+  white-space: nowrap
+}
+
+/* 小さくされた時は歌詞の文字も詰める */
+@media (max-height: 560px) {
+  .yti-pip-text {
+    font-size: 18px
+  }
+
+  .yti-pip-sub {
+    font-size: 12.5px
+  }
+
+  .yti-pip-line {
+    margin-bottom: 16px
+  }
+}
+
+/* 横長にリサイズされた時は動画を左、歌詞を右に並べる */
+@media (min-aspect-ratio: 1/1) {
+  #yti-pip {
+    display: grid;
+    grid-template-columns: minmax(0, 1.15fr) minmax(250px, 1fr);
+    grid-template-rows: auto 1fr
+  }
+
+  .yti-pip-stage {
+    grid-column: 1;
+    grid-row: 1
+  }
+
+  .yti-pip-panel {
+    grid-column: 1;
+    grid-row: 2;
+    align-self: start
+  }
+
+  .yti-pip-lyrics {
+    grid-column: 2;
+    grid-row: 1 / span 2;
+    padding-top: var(--pip-pad)
+  }
+
+  /* 歌詞が無い時は、右側の空いた列に曲名を置く */
+  #yti-pip.no-lyrics .yti-pip-panel {
+    grid-column: 2;
+    grid-row: 1 / span 2;
+    align-self: stretch
+  }
+}
+`;
+
+let pipWindow = null;
+let pipRafId = null;
+let pipVideoEl = null;
+let pipActiveLine = null;
+let pipTargetScroll = null;
+let pipUserScrollUntil = 0;
+let pipLyricsVersion = -1;
+let pipLyricsRef = null;
+let pipFrameCount = 0;
+let pipLoadStateShown = '';
+
+function createPiPPlayerElement() {
   const container = document.createElement('div');
-  container.id = 'ipod-pip-container';
+  container.id = 'yti-pip';
   container.innerHTML = `
-        <div class="ipod-chassis">
-            <div class="ipod-screen-frame">
-                <div class="ipod-screen">
-                    <div class="ipod-screen-glass"></div>
-                    <div class="ipod-header">
-                        <span id="ipod-time-display">12:42 PM</span>
-                        <span class="ipod-now-playing-label">Now Playing</span>
-                        <div class="ipod-battery-icon"><div class="ipod-battery-level"></div></div>
-                    </div>
+        <img id="yti-pip-bg" alt="">
+        <canvas id="yti-pip-bg-live" width="48" height="27"></canvas>
+        <div class="yti-pip-stage" id="yti-pip-stage">
+            <div class="yti-pip-stage-fallback" id="yti-pip-stage-fallback">
+                <svg viewBox="0 0 24 24"><path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"/></svg>
+            </div>
 
-                    <div class="ipod-video-stage" id="ipod-video-stage">
-                        <div class="ipod-video-placeholder" id="ipod-video-placeholder">
-                            <svg viewBox="0 0 24 24"><path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"/></svg>
-                        </div>
-                        <div class="ipod-np-overlay" id="ipod-np-overlay">
-                            <div class="ipod-np-meta">
-                                <div class="ipod-np-title" id="ipod-title">Now Playing</div>
-                                <div class="ipod-np-artist" id="ipod-artist">YouTube</div>
-                            </div>
-                            <div class="ipod-scrubber-bar" id="ipod-scrubber">
-                                <div class="ipod-scrubber-fill" id="ipod-scrubber-fill"></div>
-                            </div>
-                            <div class="ipod-time-labels">
-                                <span id="ipod-current-time">0:00</span>
-                                <span id="ipod-duration-time">-3:42</span>
-                            </div>
-                        </div>
+            <!-- 操作系は普段は隠し、マウスを動かした時だけ映像の上に出す -->
+            <div class="yti-pip-overlay" id="yti-pip-overlay">
+                <div class="yti-pip-seek" id="yti-pip-seek">
+                    <div class="yti-pip-seek-track">
+                        <div class="yti-pip-seek-fill" id="yti-pip-seek-fill"></div>
+                        <div class="yti-pip-seek-knob" id="yti-pip-seek-knob"></div>
                     </div>
+                </div>
+                <div class="yti-pip-transport">
+                    <span class="yti-pip-time" id="yti-pip-cur">0:00</span>
+                    <div class="yti-pip-controls">
+                        <button class="yti-pip-btn" id="yti-pip-prev" title="前の動画">
+                            <svg viewBox="0 0 24 24"><path d="M6 6h2.5v12H6zm3.5 6L18 18V6z"/></svg>
+                        </button>
+                        <button class="yti-pip-btn primary" id="yti-pip-play" title="再生 / 一時停止">
+                            <svg class="ic-play" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+                            <svg class="ic-pause" viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
+                        </button>
+                        <button class="yti-pip-btn" id="yti-pip-next" title="次の動画">
+                            <svg viewBox="0 0 24 24"><path d="M6 6l8.5 6L6 18zm9.5 0H18v12h-2.5z"/></svg>
+                        </button>
+                    </div>
+                    <span class="yti-pip-time right" id="yti-pip-dur">-0:00</span>
                 </div>
             </div>
 
-            <div class="ipod-wheel-area">
-                <div class="ipod-click-wheel" id="ipod-wheel">
-                    <div class="wheel-label label-menu">MENU</div>
-                    <div class="wheel-label label-next">
-                        <svg class="wheel-icon" viewBox="0 0 24 24"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg>
-                    </div>
-                    <div class="wheel-label label-prev">
-                        <svg class="wheel-icon" viewBox="0 0 24 24"><path d="M6 6h2v12H6zm3.5 6l8.5 6V6z"/></svg>
-                    </div>
-                    <div class="wheel-label label-play">
-                        <svg class="wheel-icon" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
-                        <svg class="wheel-icon" viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
-                    </div>
-                    <div class="ipod-center-btn" id="ipod-center-btn"></div>
-                </div>
+            <!-- 操作を隠している間の進捗表示（1.5pxの線） -->
+            <div class="yti-pip-hairline"><div class="yti-pip-hairline-fill" id="yti-pip-hairline-fill"></div></div>
+        </div>
+
+        <div class="yti-pip-panel">
+            <div class="yti-pip-meta">
+                <div class="yti-pip-title" id="yti-pip-title">Now Playing</div>
+                <div class="yti-pip-artist" id="yti-pip-artist">YouTube</div>
             </div>
+            <div class="yti-pip-note"><span class="yti-pip-eq"><i></i><i></i><i></i></span>歌詞は見つかりませんでした</div>
+        </div>
+
+        <div class="yti-pip-lyrics" id="yti-pip-lyrics">
+            <div class="yti-pip-lyrics-inner" id="yti-pip-lyrics-inner"></div>
         </div>
     `;
   return container;
 }
-async function enableIpodPiP() {
-  if (!('documentPictureInPicture' in window)) {
-    showToast("このブラウザはDesktop Modeに対応していません");
+
+// PiP の歌詞行に付ける言語クラス。MVモードの表示切替（訳のみ／原文のみ）を
+// そのまま流用できるよう、クラス名は MV 側と同じ type-* に揃える。
+function pipTextTypeClass(subText, rawText) {
+  const jp = /[\u3040-\u309f\u30a0-\u30ff\u4e00-\u9faf\u3400-\u4dbf]/;
+  const ko = /[\u1100-\u11FF\u3130-\u318F\uA960-\uA97F\uAC00-\uD7AF]/;
+  if (ko.test(subText)) return 'type-native';
+  if (jp.test(subText)) return 'type-jp';
+  return jp.test(rawText || '') ? 'type-romaji' : 'type-eng';
+}
+
+function getPiPVideo() {
+  if (pipVideoEl && pipVideoEl.isConnected) return pipVideoEl;
+  return targetVideo || document.querySelector('video');
+}
+
+function renderPiPLyrics() {
+  if (!pipWindow) return;
+  const doc = pipWindow.document;
+  const wrap = doc.getElementById('yti-pip-lyrics');
+  const inner = doc.getElementById('yti-pip-lyrics-inner');
+  if (!wrap || !inner) return;
+  ytiLyricMotion.reset(wrap);
+  inner.innerHTML = '';
+  pipActiveLine = null;
+  pipTargetScroll = null;
+  pipFirstScroll = true;
+  wrap.scrollTop = 0;
+  // MVモードの「全表示／訳のみ／原文のみ」設定を引き継ぐ
+  const mode = localStorage.getItem('mv_lyrics_mode') || 'all';
+  wrap.classList.remove('mode-jp-only', 'mode-native-only');
+  if (mode === 'jp_only') wrap.classList.add('mode-jp-only');
+  else if (mode === 'native_only') wrap.classList.add('mode-native-only');
+  const root = doc.getElementById('yti-pip');
+  if (!lyricsData || lyricsData.length === 0) {
+    // まだこの動画の取得が終わっていないなら行の形のスケルトン、
+    // 取得済みで0行なら曲名を主役にした表示（.no-lyrics）に切り替える
+    const loading = (getVideoId() || '') !== (lyricsLoadDoneVideoId || '');
+    if (root) root.classList.toggle('no-lyrics', !loading);
+    if (loading) {
+      const sk = doc.createElement('div');
+      sk.className = 'yti-pip-skeleton';
+      for (let i = 0; i < 4; i++) sk.appendChild(doc.createElement('span'));
+      inner.appendChild(sk);
+    }
     return;
   }
-  if (ipodPiPWindow) {
-    ipodPiPWindow.close();
+  if (root) root.classList.remove('no-lyrics');
+  const frag = doc.createDocumentFragment();
+  lyricsData.forEach((line) => {
+    // 前回の描画で残った参照を必ず捨てる。切り離された古い要素が残っていると
+    // アクティブ行の座標が0扱いになり、歌詞が先頭へ飛んでしまう。
+    line.pipEl = null;
+    const el = doc.createElement('div');
+    el.className = 'yti-pip-line';
+    if (line.isInstrumental) {
+      el.classList.add('instrumental');
+      const dots = doc.createElement('div');
+      dots.className = 'yti-pip-dots';
+      for (let i = 0; i < 3; i++) dots.appendChild(doc.createElement('span'));
+      el.appendChild(dots);
+    } else {
+      const rawText = line.text || '';
+      rawText.split(/\r\n|\n|\r/).forEach((subText) => {
+        if (!subText.trim()) return;
+        const span = doc.createElement('span');
+        span.className = 'yti-pip-text ' + pipTextTypeClass(subText, rawText);
+        // auto-phrase（文節での折り返し）は言語が分かって初めて効く
+        if (span.classList.contains('type-jp')) span.lang = 'ja';
+        span.textContent = subText;
+        if (span.classList.contains('type-native')) ytiKoreanRuby.decorate(span);
+        el.appendChild(span);
+      });
+      if (line.subText) {
+        line.subText.split(/\r\n|\n|\r/).forEach((subText) => {
+          if (!subText.trim()) return;
+          const span = doc.createElement('span');
+          span.className = 'yti-pip-sub';
+          span.textContent = subText.trim();
+          el.appendChild(span);
+        });
+      }
+      if (!el.childNodes.length) return;
+    }
+    el.onclick = () => {
+      const v = getPiPVideo();
+      if (v) v.currentTime = line.time;
+    };
+    line.pipEl = el;
+    frag.appendChild(el);
+  });
+  inner.appendChild(frag);
+}
+
+// 再生中の映像を48x27pxのキャンバスへ落として背景に使う。
+// CSSで拡大＋ぼかすので、この解像度で十分に「その場の色」が出る。
+// 動画はクロスオリジンでキャンバスは汚染されるが、描画するだけで
+// ピクセルを読まないため表示には支障がない。
+function pipDrawAmbientFrame() {
+  if (!pipWindow) return;
+  const canvas = pipWindow.document.getElementById('yti-pip-bg-live');
+  if (!canvas) return;
+  const v = getPiPVideo();
+  if (!v || v.readyState < 2 || !v.videoWidth) return;
+  // 一時停止中は絵が変わらないので描き直さない（既に1枚描けている場合のみ）
+  if (v.paused && canvas.classList.contains('ready')) return;
+  try {
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    // 毎回そのまま描くとカット割りのたびに背景色が飛んでチラつく。
+    // 前の絵の上に薄く重ねて、数秒かけて今の色へ寄せる（時間方向の平滑化）。
+    const first = !canvas.classList.contains('ready');
+    ctx.globalAlpha = first ? 1 : 0.12;
+    ctx.drawImage(v, 0, 0, canvas.width, canvas.height);
+    ctx.globalAlpha = 1;
+    if (first) canvas.classList.add('ready');
+  } catch (e) {
+    // 描画できない環境ではサムネイル背景のまま使い続ける
+    canvas.classList.remove('ready');
+  }
+}
+
+function pipFindActiveIndex(currentTime) {
+  return heldLyricIndex(findLyricIndexAt(currentTime));
+}
+
+// PiPウィンドウ内の要素。毎フレーム getElementById しないよう、開いた時に一度だけ集める
+let pipEls = null;
+// シークバーをドラッグ中か（その間だけ進捗バーを毎フレーム更新する）
+let pipSeekDragging = false;
+
+function collectPiPElements(doc) {
+  const g = (id) => doc.getElementById(id);
+  return {
+    root: g('yti-pip'),
+    title: g('yti-pip-title'),
+    artist: g('yti-pip-artist'),
+    cur: g('yti-pip-cur'),
+    dur: g('yti-pip-dur'),
+    play: g('yti-pip-play'),
+    fill: g('yti-pip-seek-fill'),
+    knob: g('yti-pip-seek-knob'),
+    hair: g('yti-pip-hairline-fill'),
+    wrap: g('yti-pip-lyrics')
+  };
+}
+
+
+// PiPの歌詞欄で、歌っている行を置く位置（上から38%）
+function pipLineTarget(wrap, el) {
+  return el.offsetTop - wrap.clientHeight * 0.38 + el.clientHeight / 2;
+}
+
+let pipNeedRescroll = false;
+
+function pipScrollToLine(wrap, el, fromUserScroll, gentle) {
+  const inner = el.parentNode;
+  ytiLyricMotion.scrollTo(wrap, inner, pipLineTarget(wrap, el), Array.prototype.indexOf.call(inner.children, el), {
+    instant: !!pipFirstScroll,
+    stagger: !gentle && !fromUserScroll && lyricStaggerEnabled(),
+    isRow: (r) => r.classList && r.classList.contains('yti-pip-line')
+  });
+  pipFirstScroll = false;
+}
+
+// 歌詞を描き直した直後の1回目は、動かさずに目的の位置へ置く
+let pipFirstScroll = true;
+
+function pipTick() {
+  if (!pipWindow) return;
+  try {
+    const doc = pipWindow.document;
+    if (!pipEls || !pipEls.root || !pipEls.root.isConnected) pipEls = collectPiPElements(doc);
+    const els = pipEls;
+    // 曲・言語が切り替わったらPiP側も追従して作り直す。
+    // lyricsData の「配列そのものが差し替わったか」も見るのが要点：
+    // 次の曲へ進んだ瞬間に lyricsData は空配列に置き換わるが、MVモード側の
+    // 再描画（＝lyricsRenderVersion）は歌詞が無い曲では走らないことがあるため、
+    // バージョンだけを見ていると前の曲の歌詞が残り続けてしまう。
+    // 歌詞0行のまま「読み込み中」→「歌詞なし」に変わった時も描き直す
+    const pipLoadState = (lyricsData && lyricsData.length) ? 'ready' : ((getVideoId() || '') !== (lyricsLoadDoneVideoId || '') ? 'loading' : 'none');
+    if (pipLyricsVersion !== lyricsRenderVersion || pipLyricsRef !== lyricsData || pipLoadStateShown !== pipLoadState) {
+      pipLyricsVersion = lyricsRenderVersion;
+      pipLyricsRef = lyricsData;
+      pipLoadStateShown = pipLoadState;
+      renderPiPLyrics();
+    }
+    const v = getPiPVideo();
+    pipFrameCount++;
+    // タイトル取得は本体ページのDOM走査＋正規表現で重いので約1Hzに間引く
+    if (pipFrameCount % 60 === 1) {
+      const { title, artist } = getDisplayMetadata();
+      if (els.title && els.title.textContent !== (title || 'Unknown')) els.title.textContent = title || 'Unknown';
+      if (els.artist && els.artist.textContent !== (artist || 'YouTube')) els.artist.textContent = artist || 'YouTube';
+    }
+    // 背景の色は約3Hzで追従（毎フレーム描く必要はない）
+    if (pipFrameCount % 20 === 5) pipDrawAmbientFrame();
+    // 経過時間・再生ボタンの状態は約4Hzで十分
+    if (pipFrameCount % 15 === 0) {
+      if (v && !isNaN(v.duration) && v.duration > 0) {
+        const curText = formatTime(v.currentTime);
+        if (els.cur && els.cur.textContent !== curText) els.cur.textContent = curText;
+        const durText = '-' + formatTime(v.duration - v.currentTime);
+        if (els.dur && els.dur.textContent !== durText) els.dur.textContent = durText;
+      }
+      const playing = !!(v && !v.paused);
+      if (els.play) els.play.classList.toggle('playing', playing);
+      if (els.root) els.root.classList.toggle('is-playing', playing);
+    }
+    // 進捗バーは約10Hz（シーク中だけ毎フレーム）。幅ではなく transform で伸ばし、
+    // レイアウトの再計算を起こさない。
+    const seeking = pipSeekDragging;
+    if ((pipFrameCount % 6 === 0 || seeking) && v && !isNaN(v.duration) && v.duration > 0) {
+      const ratio = Math.max(0, Math.min(1, v.currentTime / v.duration));
+      const sx = 'scaleX(' + ratio.toFixed(4) + ')';
+      if (els.fill && els.fill.style.transform !== sx) els.fill.style.transform = sx;
+      if (els.hair && els.hair.style.transform !== sx) els.hair.style.transform = sx;
+      const left = (ratio * 100).toFixed(2) + '%';
+      if (els.knob && els.knob.style.left !== left) els.knob.style.left = left;
+    }
+    // 歌詞：アクティブ行の付け替えと行送りは、行が変わった時の1回だけ。
+    // 行送りは MVモードと同じ時間差つきのばね（lyric_motion.js、合成スレッドで動く）。
+    const wrap = els.wrap;
+    if (wrap && lyricsData && lyricsData.length) {
+      const activeIndex = v ? pipFindActiveIndex(v.currentTime) : -1;
+      const active = activeIndex >= 0 ? lyricsData[activeIndex] : null;
+      const changed = (active !== pipActiveLine);
+      if (changed) {
+        if (pipActiveLine && pipActiveLine.pipEl) pipActiveLine.pipEl.classList.remove('active');
+        if (active && active.pipEl) active.pipEl.classList.add('active');
+        pipActiveLine = active;
+      }
+      const userScrolling = Date.now() < pipUserScrollUntil;
+      if (active && active.pipEl && !userScrolling) {
+        if (changed || pipNeedRescroll) {
+          pipScrollToLine(wrap, active.pipEl, pipNeedRescroll && !changed);
+          pipNeedRescroll = false;
+        } else if (pipFrameCount % 30 === 0 && !ytiLyricMotion.isMoving(wrap)) {
+          // ウィンドウのリサイズやフォント読み込みで座標がずれていたら、そっと合わせ直す
+          const target = pipLineTarget(wrap, active.pipEl);
+          const max = Math.max(0, wrap.scrollHeight - wrap.clientHeight);
+          if (Math.abs(Math.max(0, Math.min(max, target)) - wrap.scrollTop) > 3) pipScrollToLine(wrap, active.pipEl, false, true);
+        }
+      } else if (userScrolling) {
+        // 手を離したら現在の行へ戻す
+        pipNeedRescroll = true;
+      }
+    }
+  } catch (e) {}
+  // rAF は「表示されている PiP ウィンドウ側」で回す。元タブが裏に回っても止まらない。
+  pipRafId = pipWindow.requestAnimationFrame(pipTick);
+}
+
+async function enableMiniPlayerPiP() {
+  if (!('documentPictureInPicture' in window)) {
+    showToast("このブラウザはMini Playerに対応していません");
+    return;
+  }
+  if (pipWindow) {
+    pipWindow.close();
     return;
   }
   try {
-    const ipodEl = createIpodElement();
-    ipodPiPWindow = await documentPictureInPicture.requestWindow({
-      width: 280,
-      height: 450,
+    const pipEl = createPiPPlayerElement();
+    pipWindow = await documentPictureInPicture.requestWindow({
+      width: 400,
+      height: 600,
     });
-    try {
-      const cssUrl = chrome.runtime.getURL('style.css');
-      const response = await fetch(cssUrl);
-      const cssText = await response.text();
-      const style = document.createElement('style');
-      style.textContent = cssText;
-      ipodPiPWindow.document.head.appendChild(style);
-    } catch (e) {
-      [...document.styleSheets].forEach((styleSheet) => {
-        try {
-          if (styleSheet.cssRules) {
-            const cssRules = [...styleSheet.cssRules].map((rule) => rule.cssText).join('');
-            const style = document.createElement('style');
-            style.textContent = cssRules;
-            ipodPiPWindow.document.head.appendChild(style);
-          } else if (styleSheet.href) {
-            const link = document.createElement('link');
-            link.rel = 'stylesheet';
-            link.href = styleSheet.href;
-            ipodPiPWindow.document.head.appendChild(link);
-          }
-        } catch (ex) {}
-      });
+    // CSSは埋め込み定数から直接入れる（fetch も chrome.runtime も介さない）
+    const style = pipWindow.document.createElement('style');
+    style.textContent = YTI_PIP_CSS;
+    pipWindow.document.head.appendChild(style);
+    pipWindow.document.documentElement.lang = 'ja';
+    ytiKoreanRuby.applyTo(pipWindow.document);
+    pipWindow.document.body.classList.add('yti-pip-body');
+    pipWindow.document.body.appendChild(pipEl);
+    const doc = pipWindow.document;
+    // Apple Music 風のぼかし背景（サムネイル）。取得できなければ黒のまま。
+    const bg = doc.getElementById('yti-pip-bg');
+    if (bg) {
+      const thumb = getHighResThumbnail();
+      if (thumb) {
+        bg.onerror = () => {
+          bg.src = getLowResThumbnail();
+          bg.onerror = null;
+        };
+        bg.src = thumb;
+      }
     }
-    ipodPiPWindow.document.body.classList.add('ipod-pip-body');
-    ipodPiPWindow.document.body.appendChild(ipodEl);
-    // 実再生中の動画要素をそのまま iPod の画面内へ移動して、iPodの画面で
-    // 動画が流れているように見せる（Document PiP の定石）。閉じる時に元へ戻す。
-    const realVideo = targetVideo || document.querySelector('.video-stream.html5-main-video') || document.querySelector('video');
-    let ipodReturnParent = null;
-    let ipodReturnNext = null;
+    // 実再生中の動画要素をそのまま PiP 上部へ移動する（Document PiP の定石）。
+    // 閉じる時に元の位置へ戻す。
+    const realVideo = targetVideo || document.querySelector('#movie_player .video-stream.html5-main-video') || document.querySelector('video');
+    let pipReturnParent = null;
+    let pipReturnNext = null;
     let videoStyleBackup = null;
-    const stage = ipodPiPWindow.document.getElementById('ipod-video-stage');
+    const stage = doc.getElementById('yti-pip-stage');
     if (stage && realVideo) {
-      ipodReturnParent = realVideo.parentNode;
-      ipodReturnNext = realVideo.nextSibling;
+      pipReturnParent = realVideo.parentNode;
+      pipReturnNext = realVideo.nextSibling;
       videoStyleBackup = realVideo.getAttribute('style');
-      realVideo.classList.add('ipod-live-video');
-      const ph = ipodPiPWindow.document.getElementById('ipod-video-placeholder');
-      if (ph) ph.style.display = 'none';
+      realVideo.classList.add('yti-pip-live-video');
+      const fallback = doc.getElementById('yti-pip-stage-fallback');
+      if (fallback) fallback.style.display = 'none';
       stage.insertBefore(realVideo, stage.firstChild);
+      pipVideoEl = realVideo;
     }
     const restoreVideo = () => {
       try {
         if (!realVideo) return;
-        realVideo.classList.remove('ipod-live-video');
+        realVideo.classList.remove('yti-pip-live-video');
         if (videoStyleBackup !== null) realVideo.setAttribute('style', videoStyleBackup);
         else realVideo.removeAttribute('style');
-        if (ipodReturnParent) {
-          if (ipodReturnNext && ipodReturnNext.parentNode === ipodReturnParent) {
-            ipodReturnParent.insertBefore(realVideo, ipodReturnNext);
+        // 元の親（MVモードのオーバーレイなど）がPiP中に消えていることがある。
+        // その場合はYouTubeのプレイヤー内へ戻し、動画が行方不明になるのを防ぐ。
+        let parent = (pipReturnParent && pipReturnParent.isConnected) ? pipReturnParent : null;
+        if (!parent && originalParent && originalParent.isConnected) parent = originalParent;
+        if (!parent) parent = document.querySelector('#movie_player .html5-video-container') || document.querySelector('#movie_player');
+        if (parent) {
+          if (parent === pipReturnParent && pipReturnNext && pipReturnNext.parentNode === parent) {
+            parent.insertBefore(realVideo, pipReturnNext);
           } else {
-            ipodReturnParent.appendChild(realVideo);
+            parent.appendChild(realVideo);
           }
         }
       } catch (e) {}
     };
-    const syncData = () => {
-      if (!ipodPiPWindow) return;
-      const doc = ipodPiPWindow.document;
-      const {
-        title: cleanTitle,
-        artist: cleanArtist
-      } = getCleanedMetadata();
-      const titleEl = doc.getElementById('ipod-title');
-      if (titleEl) titleEl.innerText = cleanTitle || "Unknown";
-      const artistEl = doc.getElementById('ipod-artist');
-      if (artistEl) artistEl.innerText = cleanArtist || "YouTube";
-      const video = realVideo || targetVideo || document.querySelector('video');
-      if (video) {
-        const cur = video.currentTime;
-        const dur = video.duration;
-        if (!isNaN(dur) && dur > 0) {
-          const pct = (cur / dur) * 100;
-          const fill = doc.getElementById('ipod-scrubber-fill');
-          if (fill) fill.style.width = `${pct}%`;
-          const curEl = doc.getElementById('ipod-current-time');
-          if (curEl) curEl.innerText = formatTime(cur);
-          const durEl = doc.getElementById('ipod-duration-time');
-          if (durEl) durEl.innerText = "-" + formatTime(dur - cur);
-        }
-      }
-      const now = new Date();
-      const timeDisplay = doc.getElementById('ipod-time-display');
-      if (timeDisplay) timeDisplay.innerText = now.toLocaleTimeString([], {
-        hour: '2-digit',
-        minute: '2-digit'
-      });
-    };
-    syncData();
-    const syncInterval = setInterval(syncData, 1000);
-    const doc = ipodPiPWindow.document;
-    const getVideo = () => targetVideo || document.querySelector('video');
-    const togglePlay = (e) => {
-      e.stopPropagation();
-      const v = getVideo();
-      if (v) {
-        if (v.paused) v.play();
-        else v.pause();
-      }
-    };
-    const centerBtn = doc.getElementById('ipod-center-btn');
-    if (centerBtn) centerBtn.onclick = togglePlay;
-    const playBtn = doc.querySelector('.label-play');
-    if (playBtn) playBtn.onclick = togglePlay;
-    const menuBtn = doc.querySelector('.label-menu');
-    if (menuBtn) menuBtn.onclick = (e) => {
-      e.stopPropagation();
-      const v = getVideo();
-      if (v) v.currentTime = 0;
-    };
-    const nextWheel = doc.querySelector('.label-next');
-    if (nextWheel) nextWheel.onclick = (e) => {
-      e.stopPropagation();
-      const nextBtn = document.querySelector('.ytp-next-button');
-      if (nextBtn) nextBtn.click();
-    };
-    const prevWheel = doc.querySelector('.label-prev');
-    if (prevWheel) prevWheel.onclick = (e) => {
-      e.stopPropagation();
-      const prevBtn = document.querySelector('.ytp-prev-button');
-      if (prevBtn) prevBtn.click();
-    };
-    const wheel = doc.getElementById('ipod-wheel');
-    if (wheel) wheel.addEventListener('wheel', (e) => {
-      const v = getVideo();
+
+    const togglePlay = () => {
+      const v = getPiPVideo();
       if (!v) return;
-      e.preventDefault();
-      const delta = e.deltaY;
-      let vol = v.volume;
-      if (delta > 0) vol -= 0.05;
-      else vol += 0.05;
-      if (vol > 1) vol = 1;
-      if (vol < 0) vol = 0;
-      v.volume = vol;
+      if (v.paused) v.play();
+      else v.pause();
+    };
+    const playBtn = doc.getElementById('yti-pip-play');
+    if (playBtn) playBtn.onclick = (e) => {
+      e.stopPropagation();
+      togglePlay();
+    };
+    const nextBtn = doc.getElementById('yti-pip-next');
+    if (nextBtn) nextBtn.onclick = (e) => {
+      e.stopPropagation();
+      const b = document.querySelector('.ytp-next-button');
+      if (b) b.click();
+    };
+    const prevBtn = doc.getElementById('yti-pip-prev');
+    if (prevBtn) prevBtn.onclick = (e) => {
+      e.stopPropagation();
+      const b = document.querySelector('.ytp-prev-button');
+      if (b) b.click();
+    };
+    // シークバー：クリック／ドラッグで再生位置を移動
+    // ドラッグ中は操作系を自動で隠さないよう、外側のスコープで持つ
+    let seekDragging = false;
+    const seek = doc.getElementById('yti-pip-seek');
+    if (seek) {
+      const seekTo = (clientX) => {
+        const v = getPiPVideo();
+        if (!v || isNaN(v.duration) || v.duration <= 0) return;
+        const rect = seek.getBoundingClientRect();
+        const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / Math.max(1, rect.width)));
+        v.currentTime = ratio * v.duration;
+      };
+      seek.addEventListener('pointerdown', (e) => {
+        seekDragging = true;
+        pipSeekDragging = true;
+        seek.classList.add('dragging');
+        seek.setPointerCapture?.(e.pointerId);
+        seekTo(e.clientX);
+      });
+      seek.addEventListener('pointermove', (e) => {
+        if (seekDragging) seekTo(e.clientX);
+      });
+      const endSeek = () => {
+        seekDragging = false;
+        pipSeekDragging = false;
+        seek.classList.remove('dragging');
+      };
+      seek.addEventListener('pointerup', endSeek);
+      seek.addEventListener('pointercancel', endSeek);
+    }
+    // 動画部分クリックで再生/一時停止、ホイールで音量
+    if (stage) {
+      stage.addEventListener('click', togglePlay);
+      stage.addEventListener('wheel', (e) => {
+        const v = getPiPVideo();
+        if (!v) return;
+        e.preventDefault();
+        let vol = v.volume + (e.deltaY > 0 ? -0.05 : 0.05);
+        v.volume = Math.max(0, Math.min(1, vol));
+      }, { passive: false });
+    }
+    // 歌詞を手動スクロール中は自動追従を一時停止する
+    const lyricsWrap = doc.getElementById('yti-pip-lyrics');
+    if (lyricsWrap) {
+      const markUserScroll = () => {
+        pipUserScrollUntil = Date.now() + 2500;
+        ytiLyricMotion.reset(lyricsWrap);
+      };
+      lyricsWrap.addEventListener('wheel', markUserScroll, { passive: true });
+      lyricsWrap.addEventListener('touchmove', markUserScroll, { passive: true });
+    }
+    // 操作系は普段隠しておき、マウスを動かした時だけ映像の上に出す。
+    // 出しっぱなしだと歌詞の場所を食う＆ウィンドウを大きくしないと収まらないため。
+    const root = doc.getElementById('yti-pip');
+    let controlsTimer = null;
+    let pointerOnControls = false;
+    const hideControls = () => {
+      if (pointerOnControls) return;
+      if (seekDragging) return;
+      if (root) root.classList.remove('show-controls');
+    };
+    const showControls = () => {
+      if (root) root.classList.add('show-controls');
+      if (controlsTimer) clearTimeout(controlsTimer);
+      controlsTimer = setTimeout(hideControls, 2200);
+    };
+    doc.addEventListener('mousemove', showControls);
+    doc.addEventListener('pointerdown', showControls);
+    const overlayEl = doc.getElementById('yti-pip-overlay');
+    if (overlayEl) {
+      overlayEl.addEventListener('mouseenter', () => {
+        pointerOnControls = true;
+      });
+      overlayEl.addEventListener('mouseleave', () => {
+        pointerOnControls = false;
+        showControls();
+      });
+      // オーバーレイの余白クリックで再生が切り替わらないようにする
+      overlayEl.addEventListener('click', (e) => e.stopPropagation());
+    }
+    // 開いた直後だけ一度見せる（操作系があることを分かるように）
+    showControls();
+    doc.addEventListener('keydown', (e) => {
+      if (e.code === 'Space' || e.key === ' ') {
+        e.preventDefault();
+        togglePlay();
+      } else if (e.key === 'ArrowRight') {
+        const v = getPiPVideo();
+        if (v) v.currentTime = Math.min(v.duration || 0, v.currentTime + 5);
+      } else if (e.key === 'ArrowLeft') {
+        const v = getPiPVideo();
+        if (v) v.currentTime = Math.max(0, v.currentTime - 5);
+      }
     });
-    ipodPiPWindow.addEventListener('pagehide', () => {
-      clearInterval(syncInterval);
+
+    pipLyricsVersion = -1;
+    pipLyricsRef = null;
+    pipLoadStateShown = '';
+    pipEls = null;
+    pipFrameCount = 0;
+    pipUserScrollUntil = 0;
+    pipRafId = pipWindow.requestAnimationFrame(pipTick);
+
+    pipWindow.addEventListener('pagehide', () => {
+      try {
+        if (pipRafId && pipWindow) pipWindow.cancelAnimationFrame(pipRafId);
+      } catch (e) {}
+      pipRafId = null;
       restoreVideo();
-      ipodPiPWindow = null;
+      pipVideoEl = null;
+      pipActiveLine = null;
+      pipTargetScroll = null;
+      pipWindow = null;
     });
-  } catch (err) {}
+  } catch (err) {
+    pipWindow = null;
+  }
 }
 
 function formatTime(s) {
@@ -4231,72 +6487,137 @@ function formatTime(s) {
   const sec = Math.floor(s % 60);
   return `${min}:${sec < 10 ? '0' + sec : sec}`;
 }
+// ===== MVモードの歌詞の行送り =====
+// 行が変わった時だけ、YTM-Immersion と同じ「時間差つきのばね」で行を送る（lyric_motion.js）。
+// 以前は rAF で毎フレーム scrollTop を目標へ寄せていたが、それだとメインスレッドが
+// 重いフレームで歌詞も止まり、止まり際も段々になっていた。
+// rAF のループはカラオケの塗り（毎フレーム必要）がオンの時だけ回す。
 let scrollFrameId = null;
 let lastActiveEl = null;
 let cachedTargetScroll = null;
 let recalcTimer = null;
+let userScrollResumeTimer = null;
+// 歌詞を描き直した直後の1回目は、動かさずに目的の位置へ置く
+let lyricsNeedInstantScroll = true;
+let autoScrollContainer = null;
+
+function lyricStaggerEnabled() {
+  return getMvOption('mv_lyric_stagger', true);
+}
+
+function isMvLyricRow(el) {
+  return !!el && el.classList && el.classList.contains('lyric-line-container');
+}
+
+// 歌っている行を歌詞欄の中央に置く scrollTop
+function mvLyricTargetFor(container, el) {
+  return el.offsetTop - (container.clientHeight / 2) + (el.clientHeight / 2);
+}
+
+// 現在行へ歌詞を送る。syncLyrics で行が変わった時・手動スクロールから戻る時などに呼ぶ。
+function scrollMvLyricsToActive(forceInstant) {
+  const container = autoScrollContainer;
+  if (!container || !container.isConnected) return;
+  if (isLyricSelectionMode || container.classList.contains('selecting')) return;
+  if (Date.now() < userScrollUntil) return;
+  const line = activeLyricLine;
+  const el = (line && line.el && line.el.isConnected) ? line.el : null;
+  if (!el) return;
+  const target = mvLyricTargetFor(container, el);
+  const instant = !!forceInstant || lyricsNeedInstantScroll;
+  lyricsNeedInstantScroll = false;
+  const wasInstrumental = lastActiveEl && lastActiveEl.classList.contains('instrumental-line');
+  lastActiveEl = el;
+  cachedTargetScroll = target;
+  ytiLyricMotion.scrollTo(container, container, target, Array.prototype.indexOf.call(container.children, el), {
+    instant,
+    stagger: lyricStaggerEnabled(),
+    isRow: isMvLyricRow
+  });
+  // 間奏の「・・・」行は、終わると高さが縮んで行の位置がずれる。落ち着いた頃に合わせ直す
+  if (wasInstrumental) {
+    if (recalcTimer) clearTimeout(recalcTimer);
+    recalcTimer = setTimeout(() => {
+      recalcTimer = null;
+      if (!activeLyricLine || activeLyricLine.el !== el || !el.isConnected) return;
+      const again = mvLyricTargetFor(container, el);
+      if (Math.abs(again - container.scrollTop) > 2 && Date.now() >= userScrollUntil) {
+        ytiLyricMotion.scrollTo(container, container, again, Array.prototype.indexOf.call(container.children, el), {
+          stagger: false,
+          isRow: isMvLyricRow
+        });
+      }
+    }, 600);
+  }
+}
+
+// 行送りと塗りの時計。timeupdate（Chrome では約250ms間隔）では行の切り替わりが歌より遅れるので、
+// 再生中は毎フレーム現在行を確かめる（行が変わらない限り DOM は触らない）。
+function karaokeLoop() {
+  scrollFrameId = null;
+  if (!rootContainer) return;
+  if (targetVideo && !targetVideo.paused) {
+    try {
+      syncLyrics();
+    } catch (e) {}
+    if (karaokeEnabledCache) {
+      try {
+        updateKaraokeFill();
+      } catch (e) {}
+    }
+  }
+  scrollFrameId = requestAnimationFrame(karaokeLoop);
+}
+
+// カラオケの塗りのループを、設定に合わせて回す／止める
+function updateKaraokeLoop() {
+  if (karaokeEnabledCache === null) karaokeEnabledCache = getMvOption('mv_karaoke', true);
+  try {
+    updateKaraokeFill(); // クラスの付け外しを反映
+  } catch (e) {}
+  if (rootContainer && !scrollFrameId) scrollFrameId = requestAnimationFrame(karaokeLoop);
+}
 
 function startSmoothAutoScroll(container) {
-  if (scrollFrameId) cancelAnimationFrame(scrollFrameId);
+  autoScrollContainer = container;
+  lyricsNeedInstantScroll = true;
   // 手動スクロール（ホイール／タッチ）中は自動スクロールを一時停止し、
-  // 少し経ったら現在の行へ戻る。従来は毎フレーム引き戻されて手動で読めなかった。
+  // 手を離して少し経ったら現在の行へ戻る。
   if (!container._userScrollHooked) {
     container._userScrollHooked = true;
     const markUserScroll = () => {
       userScrollUntil = Date.now() + 2500;
+      // 手で動かしたので、行送りの途中の動きは止める（行が掴んだ位置からずれて見えないように）
+      ytiLyricMotion.reset(container);
+      if (userScrollResumeTimer) clearTimeout(userScrollResumeTimer);
+      userScrollResumeTimer = setTimeout(() => {
+        userScrollResumeTimer = null;
+        scrollMvLyricsToActive(false);
+      }, 2600);
     };
     container.addEventListener('wheel', markUserScroll, { passive: true });
     container.addEventListener('touchmove', markUserScroll, { passive: true });
   }
-  const updateScroll = () => {
-    // 例外が起きてもループを止めない（1度の例外で自動スクロールが死ぬのを防ぐ）
-    try {
-      // カラオケ塗りは timeupdate(約4Hz)では粗いため、このrAFループで毎フレーム更新する
-      updateKaraokeFill();
-      if (!container || !container.isConnected || isLyricSelectionMode ||
-          container.classList.contains('selecting') || Date.now() < userScrollUntil) {
-        scrollFrameId = requestAnimationFrame(updateScroll);
-        return;
-      }
-      const activeEl = container.querySelector('.lyric-line-container.active');
-      if (activeEl) {
-        if (activeEl !== lastActiveEl) {
-          const wasInstrumental = lastActiveEl && lastActiveEl.classList.contains('instrumental-line');
-          const containerHeight = container.clientHeight;
-          const elHeight = activeEl.clientHeight;
-
-          cachedTargetScroll = activeEl.offsetTop - (containerHeight / 2) + (elHeight / 2);
-
-
-          if (wasInstrumental) {
-            if (recalcTimer) clearTimeout(recalcTimer);
-            recalcTimer = setTimeout(() => {
-
-              if (activeEl === container.querySelector('.lyric-line-container.active')) {
-                cachedTargetScroll = activeEl.offsetTop - (containerHeight / 2) + (elHeight / 2);
-              }
-            }, 600);
-          }
-          lastActiveEl = activeEl;
-        }
-        if (cachedTargetScroll !== null) {
-          const currentScrollTop = container.scrollTop;
-          const diff = cachedTargetScroll - currentScrollTop;
-          if (Math.abs(diff) > 0.5) {
-            container.scrollTop = currentScrollTop + (diff * 0.25);
-          }
-        }
-      }
-    } catch (e) {}
-    scrollFrameId = requestAnimationFrame(updateScroll);
-  };
-  updateScroll();
+  if (!container._resizeRecenterHooked) {
+    container._resizeRecenterHooked = true;
+    // 窓の大きさ・歌詞欄の高さが変わったら、動かさずに中央へ置き直す
+    const ro = new ResizeObserver(() => scrollMvLyricsToActive(true));
+    ro.observe(container);
+  }
+  updateKaraokeLoop();
+  scrollMvLyricsToActive(true);
 }
 
 function stopSmoothAutoScroll() {
   if (scrollFrameId) {
     cancelAnimationFrame(scrollFrameId);
     scrollFrameId = null;
+  }
+  if (autoScrollContainer) ytiLyricMotion.reset(autoScrollContainer);
+  autoScrollContainer = null;
+  if (userScrollResumeTimer) {
+    clearTimeout(userScrollResumeTimer);
+    userScrollResumeTimer = null;
   }
   // 保留中の再計算タイマーが古いコンテナの座標を次のセッションに書き込まないように
   if (recalcTimer) {

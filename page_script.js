@@ -69,12 +69,39 @@
     }
   }
 
+  // 視聴ページの next 応答（videoId ごとに直近の数本だけ）
+  if (!window.__yti_next__) window.__yti_next__ = {};
+  function _yti_storeNext(j) {
+    try {
+      const vid = j && j.currentVideoEndpoint && j.currentVideoEndpoint.watchEndpoint && j.currentVideoEndpoint.watchEndpoint.videoId;
+      if (!vid || !j.contents || !j.contents.twoColumnWatchNextResults) return;
+      const store = window.__yti_next__;
+      delete store[vid];
+      store[vid] = j;
+      const ids = Object.keys(store);
+      for (let i = 0; i < ids.length - 4; i++) delete store[ids[i]];
+    } catch (_) {}
+  }
+  // SPA 遷移の完了イベントにも同じ応答が入っている（fetch を経ない経路の保険）
+  document.addEventListener('yt-navigate-finish', (e) => {
+    try {
+      const r = e && e.detail && e.detail.response;
+      _yti_storeNext((r && r.response) || r);
+    } catch (_) {}
+  });
+
   function _yti_cacheCaption(url, text) {
     if (!text || !text.trim()) return;
     const meta = _yti_parseTimedtext(url);
     if (!meta) return;
     const store = window.__yt_lyrics_cache__;
-    if (!store[meta.videoId]) store[meta.videoId] = {};
+    if (!store[meta.videoId]) {
+      store[meta.videoId] = {};
+      // 見た動画の字幕を全部抱え続けると、長時間の連続再生でメモリが膨らむ。
+      // 新しい順に20本だけ残す（オブジェクトのキーは追加順に並ぶ）。
+      const ids = Object.keys(store);
+      for (let i = 0; i < ids.length - 20; i++) delete store[ids[i]];
+    }
     store[meta.videoId][meta.key] = {
       text: text,
       lang: meta.lang,
@@ -139,6 +166,10 @@
             response.clone().text().then(text => {
               _yti_cacheCaption(url, text);
             }).catch(() => {});
+          } else if (typeof url === 'string' && url.includes('/youtubei/v1/next') && response.ok) {
+            // 視聴ページの SPA 遷移で届く next 応答。ytInitialData は最初のページのまま
+            // 更新されないので、曲名・アーティスト（概要欄のミュージック）と次の動画はここから読む。
+            response.clone().json().then(_yti_storeNext).catch(() => {});
           }
         } catch (_) {}
         return response;
@@ -168,6 +199,224 @@
       } catch (_) {}
     });
   }
+  // ===== 構造化楽曲メタデータ（概要欄の「ミュージック」セクション）ブリッジ =====
+  // Content IDでマッチした動画は ytInitialData に曲名・アーティスト・アルバムが
+  // 構造化データとして入っている。動画タイトルのパースより遥かに正確なので、
+  // 外部歌詞DBの検索キーとして使う。
+  if (!window._YTI_MusicMetaBridge) {
+    window._YTI_MusicMetaBridge = true;
+
+    // infoRowのラベルはロケールで変わる。主要言語を辞書で拾い、
+    // 未知のロケールでは行順によるフォールバックへ落とす。
+    const _YTI_LBL = {
+      song: /^(ソング|曲|曲名|song|canci[oó]n|chanson|lied|canzone|m[uú]sica|musica|노래|음악|歌曲|歌名|bài h[aá]t|เพลง)$/i,
+      artist: /^(アーティスト|artist|artiste|k[uü]nstler|artista|interpret|아티스트|艺术家|藝人|ngh[eệ] s[iĩ]|ศิลปิน)$/i,
+      album: /^(アルバム|album|[aá]lbum|앨범|专辑|專輯)$/i
+    };
+
+    function _yti_textOf(node) {
+      if (!node) return '';
+      if (typeof node === 'string') return node;
+      if (node.simpleText) return String(node.simpleText);
+      if (Array.isArray(node.runs)) return node.runs.map(r => (r && r.text) ? r.text : '').join('');
+      return '';
+    }
+
+    // ytInitialData のどこに置かれるかは頻繁に変わるため、固定パスではなく
+    // 「infoRows を持つオブジェクト」を全探索する。
+    function _yti_collectInfoRows(root) {
+      const found = [];
+      const seen = new Set();
+      const walk = (o, depth) => {
+        if (!o || typeof o !== 'object' || depth > 25 || found.length >= 8) return;
+        if (seen.has(o)) return;
+        seen.add(o);
+        if (Array.isArray(o)) {
+          for (const v of o) walk(v, depth + 1);
+          return;
+        }
+        if (Array.isArray(o.infoRows) && o.infoRows.length) found.push(o.infoRows);
+        for (const k in o) walk(o[k], depth + 1);
+      };
+      walk(root, 0);
+      return found;
+    }
+
+    function _yti_parseMusicRows(rows) {
+      const pairs = [];
+      for (const r of rows) {
+        const ir = (r && r.infoRowRenderer) ? r.infoRowRenderer : r;
+        if (!ir || typeof ir !== 'object') continue;
+        const label = _yti_textOf(ir.title).trim();
+        const value = (_yti_textOf(ir.defaultMetadata) || _yti_textOf(ir.expandedMetadata)).trim();
+        // 「ライセンス提供」等は値が長文になりがち。曲名/アーティストではない
+        if (!value || value.length > 120) continue;
+        pairs.push({ label, value });
+      }
+      if (!pairs.length) return null;
+      const out = { song: '', artist: '', album: '' };
+      let labelHit = false;
+      for (const p of pairs) {
+        if (!out.song && _YTI_LBL.song.test(p.label)) { out.song = p.value; labelHit = true; }
+        else if (!out.artist && _YTI_LBL.artist.test(p.label)) { out.artist = p.value; labelHit = true; }
+        else if (!out.album && _YTI_LBL.album.test(p.label)) { out.album = p.value; labelHit = true; }
+      }
+      // 未知ロケール：ラベルが1つも一致しなかった時だけ行順で推測する。
+      // ミュージックセクションは ソング→アーティスト→アルバム の順が慣例。
+      if (!labelHit && pairs.length >= 2) {
+        out.song = pairs[0].value;
+        out.artist = pairs[1].value;
+        if (pairs.length >= 3) out.album = pairs[2].value;
+      }
+      return out.song ? out : null;
+    }
+
+    // 戻り値 { meta, stale }。stale は「前ページのデータしか無い」ことを示す。
+    // これを null と同一視すると、呼び出し側が「楽曲メタ無し」と誤って確定
+    // キャッシュしてしまうため、区別して返す。
+    function _yti_extractMusicMeta(videoId) {
+      // SPA 遷移後は next 応答から読む（ytInitialData は最初のページのまま）
+      const nx = videoId && window.__yti_next__ && window.__yti_next__[videoId];
+      if (nx) {
+        for (const rows of _yti_collectInfoRows(nx)) {
+          const m = _yti_parseMusicRows(rows);
+          if (m) return { meta: m, stale: false };
+        }
+        return { meta: null, stale: false };
+      }
+      if (typeof ytInitialData === 'undefined' || !ytInitialData) return { meta: null, stale: true };
+      // SPA遷移後も ytInitialData は前ページのまま残る。必ず動画IDを検証する。
+      const curId = ytInitialData?.currentVideoEndpoint?.watchEndpoint?.videoId || '';
+      if (videoId && curId && curId !== videoId) return { meta: null, stale: true };
+      for (const rows of _yti_collectInfoRows(ytInitialData)) {
+        const m = _yti_parseMusicRows(rows);
+        if (m) return { meta: m, stale: false };
+      }
+      return { meta: null, stale: false };
+    }
+
+    window.addEventListener('YTI_RequestMusicMeta', (e) => {
+      let videoId = '';
+      try {
+        videoId = (typeof e.detail === 'string') ? e.detail : ((e.detail && e.detail.videoId) || '');
+      } catch (_) {}
+      let res = { meta: null, stale: true };
+      try {
+        res = _yti_extractMusicMeta(videoId);
+      } catch (_) {}
+      try {
+        window.dispatchEvent(new CustomEvent('YTI_MusicMetaResponse', {
+          detail: JSON.stringify({ videoId: videoId, meta: res.meta, stale: !!res.stale })
+        }));
+      } catch (_) {}
+    });
+  }
+
+  // ===== 再生中の動画の基本情報ブリッジ =====
+  // SPA遷移の直後は、ページ側のタイトル要素（h1）がまだ前の動画のまま残っている。
+  // プレイヤーの getVideoData() は新しい動画の読み込み開始と同時に切り替わるので、
+  // 曲名を即座に出すための情報源として使う。応答は同期的に返る。
+  if (!window._YTI_VideoDataBridge) {
+    window._YTI_VideoDataBridge = true;
+    window.addEventListener('YTI_RequestVideoData', () => {
+      let out = { videoId: '', title: '', author: '', category: '' };
+      try {
+        const player = document.getElementById('movie_player');
+        const d = (player && typeof player.getVideoData === 'function') ? player.getVideoData() : null;
+        if (d) out = { videoId: d.video_id || '', title: d.title || '', author: d.author || '', category: '' };
+        // 動画のカテゴリ（「音楽」か）。音声の記録を音楽の動画だけに絞るのに使う
+        const pr = (player && typeof player.getPlayerResponse === 'function') ? player.getPlayerResponse() : null;
+        const mf = pr && pr.microformat && pr.microformat.playerMicroformatRenderer;
+        if (mf && pr.videoDetails && pr.videoDetails.videoId === out.videoId) out.category = mf.category || '';
+      } catch (_) {}
+      try {
+        window.dispatchEvent(new CustomEvent('YTI_VideoDataResponse', { detail: JSON.stringify(out) }));
+      } catch (_) {}
+    });
+  }
+
+  // ===== 次に再生される動画（自動再生・再生リスト）=====
+  // 歌詞を先に引いておき、曲が変わった瞬間に出すために使う。
+  if (!window._YTI_NextVideoBridge) {
+    window._YTI_NextVideoBridge = true;
+    window.addEventListener('YTI_RequestNextVideo', (e) => {
+      let videoId = '';
+      try {
+        videoId = String(e.detail || '');
+      } catch (_) {}
+      let next = '';
+      try {
+        let j = videoId && window.__yti_next__ && window.__yti_next__[videoId];
+        if (!j && typeof ytInitialData !== 'undefined' && ytInitialData &&
+            ytInitialData.currentVideoEndpoint && ytInitialData.currentVideoEndpoint.watchEndpoint &&
+            ytInitialData.currentVideoEndpoint.watchEndpoint.videoId === videoId) j = ytInitialData;
+        const two = j && j.contents && j.contents.twoColumnWatchNextResults;
+        const pl = two && two.playlist && two.playlist.playlist;
+        if (pl && Array.isArray(pl.contents)) {
+          const items = pl.contents.map(c => c && c.playlistPanelVideoRenderer).filter(Boolean);
+          const at = items.findIndex(it => it.videoId === videoId);
+          if (at >= 0 && items[at + 1]) next = items[at + 1].videoId;
+        }
+        if (!next) {
+          const sets = two && two.autoplay && two.autoplay.autoplay && two.autoplay.autoplay.sets;
+          const ep = sets && sets[0] && sets[0].autoplayVideo && sets[0].autoplayVideo.watchEndpoint;
+          if (ep && ep.videoId) next = ep.videoId;
+        }
+      } catch (_) {}
+      try {
+        window.dispatchEvent(new CustomEvent('YTI_NextVideoResponse', { detail: JSON.stringify({ videoId, next }) }));
+      } catch (_) {}
+    });
+  }
+
+  // ===== 端末内翻訳（Chrome 内蔵の Translator / LanguageDetector API）=====
+  // API キーも外部への送信も無い翻訳。モデルの初回ダウンロードにはユーザーの操作が要るので、
+  // content.js 側のボタンを押した流れ（ユーザー操作）でここが呼ばれる。
+  if (!window._YTI_TranslateBridge) {
+    window._YTI_TranslateBridge = true;
+    const translators = {};
+    window.addEventListener('YTI_TranslateRequest', async (e) => {
+      let req = null;
+      try {
+        req = JSON.parse(e.detail);
+      } catch (_) {}
+      if (!req || !req.id) return;
+      const reply = (o) => {
+        try {
+          window.dispatchEvent(new CustomEvent('YTI_TranslateResponse', { detail: JSON.stringify(Object.assign({ id: req.id }, o)) }));
+        } catch (_) {}
+      };
+      try {
+        if (req.op === 'detect') {
+          if (typeof LanguageDetector === 'undefined') return reply({ ok: false, status: 'unsupported' });
+          const det = await LanguageDetector.create();
+          const r = await det.detect(String(req.text || ''));
+          return reply({ ok: true, lang: (r && r[0] && r[0].detectedLanguage) || '' });
+        }
+        if (typeof Translator === 'undefined') return reply({ ok: false, status: 'unsupported' });
+        const opt = { sourceLanguage: req.source, targetLanguage: req.target };
+        if (req.op === 'availability') return reply({ ok: true, status: await Translator.availability(opt) });
+        const key = req.source + '>' + req.target;
+        if (!translators[key]) {
+          translators[key] = await Translator.create(Object.assign({}, opt, {
+            monitor(m) {
+              m.addEventListener('downloadprogress', (ev) => {
+                try {
+                  window.dispatchEvent(new CustomEvent('YTI_TranslateProgress', { detail: JSON.stringify({ key, loaded: ev.loaded }) }));
+                } catch (_) {}
+              });
+            }
+          }));
+        }
+        const out = [];
+        for (const t of (req.texts || [])) out.push(t ? await translators[key].translate(t) : '');
+        reply({ ok: true, texts: out });
+      } catch (err) {
+        reply({ ok: false, status: 'error', error: String((err && err.message) || err) });
+      }
+    });
+  }
+
   const scriptTag = document.currentScript;
   const eventId = scriptTag ? scriptTag.getAttribute('data-event-id') : null;
   if (!eventId) return;

@@ -1,11 +1,13 @@
 {
   "manifest_version": 3,
   "name": "YT Immersion",
-  "version": "0.9.7",
-  "description": "beta 6",
+  "version": "0.10.0",
+  "description": "beta 7 / 公式歌詞・語単位カラオケ・MVの時間合わせ",
   "permissions": [
     "scripting",
-    "activeTab"
+    "activeTab",
+    "storage",
+    "unlimitedStorage"
   ],
   "host_permissions": [
     "<all_urls>"
@@ -49,14 +51,37 @@
         "style.css"
       ],
       "js": [
-        "content.js"
+        "core/text.js",
+        "core/parsers.js",
+        "core/warp.js",
+        "core/align.js",
+        "core/pairing.js",
+        "core/kana.js",
+        "letterbox.js",
+        "audio_sync.js",
+        "lyric_motion.js",
+        "korean_ruby.js",
+        "music_resolver.js",
+        "content.js",
+        "player_guard.js",
+        "lyrics_pipeline.js",
+        "karaoke_words.js",
+        "language.js",
+        "parts.js",
+        "chants.js",
+        "community.js"
       ]
     }
   ],
   "web_accessible_resources": [
     {
-      "resources": [ "style.css", "page_script.js" ],
-      "matches": [ "<all_urls>" ]
+      "resources": [
+        "style.css",
+        "page_script.js"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
     }
   ]
 }
